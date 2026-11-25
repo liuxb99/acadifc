@@ -243,6 +243,13 @@ fn mtext_from_data(
     e.dwg_x_direction = Some(data.x_direction);
     e.dwg_unknown_bit = data.unknown_bit;
     e.style_handle = Some(Handle::new(data.style_handle));
+    e.source_rotation = Some(e.rotation);
+    e.source_normal = Some(e.normal);
+    e.source_style = Some(e.style.clone());
+    e.source_value = Some(e.value.clone());
+    e.source_height = Some(e.height);
+    e.source_rect_width = Some(e.rectangle_width);
+    e.source_line_spacing = Some(data.linespacing_factor);
     e.line_spacing_factor = data.linespacing_factor;
     e.line_spacing_style = crate::entities::LineSpacingStyle::from(data.linespacing_style);
     e.background_fill_flags = data.background_flags;

@@ -157,6 +157,28 @@ pub struct MText {
     /// on same-version writes; its semantics are intentionally not guessed.
     #[cfg_attr(feature = "serde", serde(default, skip))]
     pub dwg_unknown_bit: bool,
+    /// Source semantic snapshot. These are set by the DWG reader and compared
+    /// by the writer, so direct field assignment, serde and clone/copy cannot
+    /// bypass change detection.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_rotation: Option<f64>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_normal: Option<Vector3>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_style: Option<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_value: Option<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_height: Option<f64>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_rect_width: Option<f64>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_line_spacing: Option<f64>,
+    /// True when text/layout changed and the cached extents no longer describe
+    /// the authored text. The writer writes explicit zero (invalid) extents
+    /// instead of guessing glyph sizes from an unavailable font.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extents_dirty: bool,
 }
 
 impl PartialEq for MText {
@@ -226,6 +248,14 @@ impl MText {
             style_dirty: false,
             direction_dirty: false,
             dwg_unknown_bit: false,
+            source_rotation: None,
+            source_normal: None,
+            source_style: None,
+            source_value: None,
+            source_height: None,
+            source_rect_width: None,
+            source_line_spacing: None,
+            extents_dirty: false,
         }
     }
 
@@ -266,6 +296,42 @@ impl MText {
     pub fn set_style(&mut self, style: impl Into<String>) {
         self.style = style.into();
         self.style_dirty = true;
+        self.extents_dirty = true;
+    }
+
+    /// Change the authored text; cached extents become invalid.
+    pub fn set_value(&mut self, value: impl Into<String>) {
+        self.value = value.into();
+        self.extents_dirty = true;
+    }
+
+    /// Change text height; cached extents become invalid.
+    pub fn set_height(&mut self, height: f64) {
+        self.height = height;
+        self.extents_dirty = true;
+    }
+
+    /// Change reference width; cached extents become invalid.
+    pub fn set_rectangle_width(&mut self, width: f64) {
+        self.rectangle_width = width;
+        self.extents_dirty = true;
+    }
+
+    /// Change line spacing; cached extents become invalid.
+    pub fn set_line_spacing_factor(&mut self, factor: f64) {
+        self.line_spacing_factor = factor;
+        self.extents_dirty = true;
+    }
+
+    /// Whether the cached extents still describe the authored text.
+    pub fn extents_are_valid(&self) -> bool {
+        if self.extents_dirty { return false; }
+        if let Some(v) = &self.source_value { if v != &self.value { return false; } }
+        if let Some(v) = self.source_height { if v != self.height { return false; } }
+        if let Some(v) = self.source_rect_width { if v != self.rectangle_width { return false; } }
+        if let Some(ref v) = self.source_style { if v != &self.style { return false; } }
+        if let Some(v) = self.source_line_spacing { if v != self.line_spacing_factor { return false; } }
+        true
     }
 }
 

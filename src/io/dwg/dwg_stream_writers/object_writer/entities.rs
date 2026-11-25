@@ -826,7 +826,13 @@ impl<'a> DwgObjectWriter<'a> {
     /// tilted, instead of forcing (cos, sin, 0).
     fn mtext_x_direction(e: &MText) -> Vector3 {
         if let Some(direction) = e.dwg_x_direction {
-            if !e.direction_dirty {
+            // A freshly authored entity has no source snapshot; its explicit
+            // direction is authoritative. A read-back entity is compared to
+            // the semantic snapshot so public-field mutation cannot bypass.
+            let no_snapshot = e.source_rotation.is_none() && e.source_normal.is_none();
+            let unchanged = e.source_rotation.map(|v| v == e.rotation).unwrap_or(false)
+                && e.source_normal.map(|v| v == e.normal).unwrap_or(false);
+            if (no_snapshot || unchanged) && !e.direction_dirty {
                 return direction;
             }
         }
@@ -873,10 +879,18 @@ impl<'a> DwgObjectWriter<'a> {
         // Drawing dir BS 72 (unconditional â€” written for ALL versions)
         self.writer.write_bit_short(e.drawing_direction as i16);
 
+        // Extents are a cache of the authored text. Preserve them verbatim on
+        // a no-op save; invalidate (explicit zero) when text/layout changed —
+        // never guess glyph metrics from an unavailable font.
+        let (extents_height, extents_width) = if e.extents_are_valid() {
+            (e.extents_height, e.extents_width)
+        } else {
+            (0.0, 0.0)
+        };
         // Extents ht BD (DXF 43, output-only)
-        self.writer.write_bit_double(e.extents_height);
+        self.writer.write_bit_double(extents_height);
         // Extents wid BD (DXF 42, output-only)
-        self.writer.write_bit_double(e.extents_width);
+        self.writer.write_bit_double(extents_width);
 
         // Text TV 1
         self.writer.write_variable_text(&e.value);
@@ -887,7 +901,10 @@ impl<'a> DwgObjectWriter<'a> {
         // triggers name resolution.
         let resolved = self.document.text_styles.get(&e.style).map(|s| s.handle)
             .filter(|h| !h.is_null());
-        let style_handle = if !e.style_dirty {
+        let style_unchanged = e.source_style.as_deref()
+            .map(|v| v == e.style.as_str())
+            .unwrap_or(false);
+        let style_handle = if style_unchanged && !e.style_dirty {
             e.style_handle.filter(|h| !h.is_null()).or(resolved)
         } else {
             resolved
