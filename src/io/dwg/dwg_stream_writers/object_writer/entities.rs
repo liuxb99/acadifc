@@ -821,6 +821,28 @@ impl<'a> DwgObjectWriter<'a> {
 
     // â”€â”€ MText â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+    /// MTEXT X direction in the entity's OCS. Rodrigues rotation of the OCS
+    /// X axis around the extrusion normal keeps a non-zero Z when the OCS is
+    /// tilted, instead of forcing (cos, sin, 0).
+    fn mtext_x_direction(e: &MText) -> Vector3 {
+        if let Some(direction) = e.dwg_x_direction {
+            if !e.direction_dirty {
+                return direction;
+            }
+        }
+        let axis = e.normal.normalize();
+        let x = Vector3::UNIT_X;
+        let cos = e.rotation.cos();
+        let sin = e.rotation.sin();
+        let cross = axis.cross(&x);
+        let dot = axis.dot(&x);
+        Vector3::new(
+            cos * x.x + sin * cross.x + (1.0 - cos) * dot * axis.x,
+            cos * x.y + sin * cross.y + (1.0 - cos) * dot * axis.y,
+            cos * x.z + sin * cross.z + (1.0 - cos) * dot * axis.z,
+        )
+    }
+
     fn write_mtext(&mut self, e: &MText) {
         self.entity_preamble(common::OBJ_MTEXT, &e.common);
 
@@ -829,15 +851,10 @@ impl<'a> DwgObjectWriter<'a> {
         // Extrusion 3BD 210 (NOT BitExtrusion â€” full 3BD per spec)
         self.writer.write_3bit_double(e.normal);
 
-        // X-axis dir 3BD 11 (alignment point / direction vector)
-        let x_dir = e
-            .dwg_x_direction
-            .filter(|direction| {
-                direction.y.atan2(direction.x) == e.rotation
-            })
-            .unwrap_or_else(|| {
-                Vector3::new(e.rotation.cos(), e.rotation.sin(), 0.0)
-            });
+        // X-axis dir 3BD 11. Reuse the source vector verbatim unless the
+        // caller changed rotation/normal; never use an `atan2` equality test,
+        // which is both float-fragile and wrong for a non-default OCS.
+        let x_dir = Self::mtext_x_direction(e);
         self.writer.write_3bit_double(x_dir);
 
         // Rect width BD 41
@@ -864,13 +881,27 @@ impl<'a> DwgObjectWriter<'a> {
         // Text TV 1
         self.writer.write_variable_text(&e.value);
 
-        // H 7 STYLE (hard pointer) â€” written BEFORE R2000+ block
-        let style_handle = self
-            .document
-            .text_styles
-            .get(&e.style)
-            .map(|s| s.handle)
-            .unwrap_or(Handle::NULL);
+        // H 7 STYLE (hard pointer). Keep the original reference on a no-op
+        // save, including styles whose name cannot be round-tripped through
+        // the table (Big5/SHX/BigFont names). Only a deliberate style change
+        // triggers name resolution.
+        let resolved = self.document.text_styles.get(&e.style).map(|s| s.handle)
+            .filter(|h| !h.is_null());
+        let style_handle = if !e.style_dirty {
+            e.style_handle.filter(|h| !h.is_null()).or(resolved)
+        } else {
+            resolved
+        };
+        let style_handle = match style_handle {
+            Some(h) => h,
+            None => {
+                self.fidelity_errors.push(format!(
+                    "MTEXT {:#X}: STYLE '{}' cannot be resolved; refusing to write NULL",
+                    e.common.handle.value(), e.style,
+                ));
+                e.style_handle.unwrap_or(Handle::NULL)
+            }
+        };
         self.writer
             .write_handle(DwgReferenceType::HardPointer, style_handle.value());
 
@@ -878,8 +909,8 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_short(e.line_spacing_style as i16);
         // Linespacing Factor BD 44
         self.writer.write_bit_double(e.line_spacing_factor);
-        // Unknown bit B
-        self.writer.write_bit(false);
+        // Uninterpreted bit captured by read_mtext; never invent a value.
+        self.writer.write_bit(e.dwg_unknown_bit);
 
         // R2004+:
         if self.version.r2004_plus() {
@@ -5628,7 +5659,7 @@ mod tests {
         };
         let doc = make_doc_with_entity(EntityType::Point(pt));
         let writer = DwgObjectWriter::new(&doc).unwrap();
-        let (output, _map, _, _) = writer.write();
+        let (output, _map, _, _, _) = writer.write();
         assert!(!output.is_empty());
     }
 
@@ -5646,7 +5677,7 @@ mod tests {
         };
         let doc = make_doc_with_entity(EntityType::Line(line));
         let writer = DwgObjectWriter::new(&doc).unwrap();
-        let (output, _map, _, _) = writer.write();
+        let (output, _map, _, _, _) = writer.write();
         assert!(!output.is_empty());
     }
 }

@@ -241,6 +241,8 @@ fn mtext_from_data(
     };
     e.rotation = data.x_direction.y.atan2(data.x_direction.x);
     e.dwg_x_direction = Some(data.x_direction);
+    e.dwg_unknown_bit = data.unknown_bit;
+    e.style_handle = Some(Handle::new(data.style_handle));
     e.line_spacing_factor = data.linespacing_factor;
     e.line_spacing_style = crate::entities::LineSpacingStyle::from(data.linespacing_style);
     e.background_fill_flags = data.background_flags;

@@ -84,7 +84,7 @@ impl Default for MTextColumnData {
 }
 
 /// A multi-line text entity
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MText {
     /// Common entity data
@@ -140,6 +140,55 @@ pub struct MText {
     /// "extents height"). 0 when never laid out.
     #[cfg_attr(feature = "serde", serde(default))]
     pub extents_height: f64,
+    /// Original DWG STYLE handle. Kept even when the style name cannot be
+    /// resolved back to a table entry, so a no-op save never writes NULL.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub style_handle: Option<crate::types::Handle>,
+    /// Set when the caller changes `style`; the writer then resolves the new
+    /// name instead of reusing the original handle.
+    #[cfg_attr(feature = "serde", serde(default, skip))]
+    pub style_dirty: bool,
+    /// Set when rotation or OCS normal changes; the writer must recompute the
+    /// X direction in the (possibly non-default) OCS instead of reusing the
+    /// direction captured from the source record.
+    #[cfg_attr(feature = "serde", serde(default, skip))]
+    pub direction_dirty: bool,
+    /// Uninterpreted bit read from the R2000+ MTEXT record. Preserved verbatim
+    /// on same-version writes; its semantics are intentionally not guessed.
+    #[cfg_attr(feature = "serde", serde(default, skip))]
+    pub dwg_unknown_bit: bool,
+}
+
+impl PartialEq for MText {
+    /// Compare the authored/semantic state. The original STYLE handle, its
+    /// dirty flag and the cached X-direction dirty flag are round-trip
+    /// bookkeeping, not authored values; asserting equality on them would
+    /// make every freshly written MTEXT differ from the one read back.
+    fn eq(&self, other: &Self) -> bool {
+        self.common == other.common
+            && self.value == other.value
+            && self.insertion_point == other.insertion_point
+            && self.height == other.height
+            && self.rectangle_width == other.rectangle_width
+            && self.rectangle_height == other.rectangle_height
+            && self.rotation == other.rotation
+            && self.dwg_x_direction == other.dwg_x_direction
+            && self.style == other.style
+            && self.attachment_point == other.attachment_point
+            && self.drawing_direction == other.drawing_direction
+            && self.line_spacing_factor == other.line_spacing_factor
+            && self.line_spacing_style == other.line_spacing_style
+            && self.normal == other.normal
+            && self.background_fill_flags == other.background_fill_flags
+            && self.background_scale == other.background_scale
+            && self.background_color == other.background_color
+            && self.background_transparency == other.background_transparency
+            && self.is_annotative == other.is_annotative
+            && self.column_data == other.column_data
+            && self.extents_width == other.extents_width
+            && self.extents_height == other.extents_height
+            && self.dwg_unknown_bit == other.dwg_unknown_bit
+    }
 }
 
 impl MText {
@@ -173,6 +222,10 @@ impl MText {
             column_data: MTextColumnData::new(),
             extents_width: 0.0,
             extents_height: 0.0,
+            style_handle: None,
+            style_dirty: false,
+            direction_dirty: false,
+            dwg_unknown_bit: false,
         }
     }
 
@@ -195,6 +248,24 @@ impl MText {
     pub fn with_width(mut self, width: f64) -> Self {
         self.rectangle_width = width;
         self
+    }
+
+    /// Change rotation and mark the cached DWG X direction stale.
+    pub fn set_rotation(&mut self, rotation: f64) {
+        self.rotation = rotation;
+        self.direction_dirty = true;
+    }
+
+    /// Change the OCS normal and mark the cached DWG X direction stale.
+    pub fn set_normal(&mut self, normal: Vector3) {
+        self.normal = normal;
+        self.direction_dirty = true;
+    }
+
+    /// Change the text style and mark the original STYLE handle stale.
+    pub fn set_style(&mut self, style: impl Into<String>) {
+        self.style = style.into();
+        self.style_dirty = true;
     }
 }
 

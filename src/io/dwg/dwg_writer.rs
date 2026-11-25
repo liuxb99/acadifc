@@ -118,6 +118,19 @@ impl DwgWriter {
 // ════════════════════════════════════════════════════════════════════════════
 
 /// Validate that the document version is supported for DWG writing.
+/// Fail the write rather than silently emitting a lossy reference (e.g. a
+/// changed STYLE name that has no matching table entry).
+fn reject_fidelity_errors(errors: Vec<String>) -> Result<()> {
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(DxfError::Custom(format!(
+            "DWG fidelity error(s): {}",
+            errors.join("; ")
+        )))
+    }
+}
+
 fn validate_version(version: DxfVersion) -> Result<()> {
     match version {
         DxfVersion::Unknown => Err(DxfError::UnsupportedVersion(
@@ -443,7 +456,8 @@ fn write_ac15<W: Write + Seek>(
     // ── Phase 1: Compute objects FIRST to get handle map ──
     let objects_started = web_time::Instant::now();
     let obj_writer = DwgObjectWriter::new(document)?;
-    let (obj_data, handle_map_u32, extents, _sab_entries) = obj_writer.write();
+    let (obj_data, handle_map_u32, extents, _sab_entries, fidelity_errors) = obj_writer.write();
+    reject_fidelity_errors(fidelity_errors)?;
     if std::env::var_os("PERF").is_some() {
         eprintln!(
             "[perf] dwg-write objects={:.1}ms bytes={} handles={} format=ac15",
@@ -549,7 +563,8 @@ fn write_ac18<W: Write + Seek>(
     // ── Phase 1: Compute objects FIRST to get handle map ──
     let objects_started = web_time::Instant::now();
     let obj_writer = DwgObjectWriter::new(document)?;
-    let (obj_data, handle_map_u32, extents, sab_entries) = obj_writer.write();
+    let (obj_data, handle_map_u32, extents, sab_entries, fidelity_errors) = obj_writer.write();
+    reject_fidelity_errors(fidelity_errors)?;
     if std::env::var_os("PERF").is_some() {
         eprintln!(
             "[perf] dwg-write objects={:.1}ms bytes={} handles={} format=ac18",
@@ -684,7 +699,8 @@ fn write_ac21_impl<W: Write + Seek>(
     // ── Phase 1: Compute objects FIRST to get handle map ──
     let objects_started = web_time::Instant::now();
     let obj_writer = DwgObjectWriter::new(document)?;
-    let (obj_data, handle_map_u32, extents, sab_entries) = obj_writer.write();
+    let (obj_data, handle_map_u32, extents, sab_entries, fidelity_errors) = obj_writer.write();
+    reject_fidelity_errors(fidelity_errors)?;
     if std::env::var_os("PERF").is_some() {
         eprintln!(
             "[perf] dwg-write objects={:.1}ms bytes={} handles={} format=ac21",

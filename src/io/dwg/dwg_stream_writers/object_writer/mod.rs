@@ -123,6 +123,10 @@ pub struct DwgObjectWriter<'a> {
     /// Populated before writing any table controls so controls and records agree.
     #[allow(dead_code)]
     pub(super) linetype_handles: std::collections::HashMap<String, Handle>,
+    /// Fidelity errors encountered while serializing (e.g. an explicitly
+    /// changed STYLE name that cannot be resolved to a table entry). A no-op
+    /// save must not silently turn such a reference into NULL.
+    pub(super) fidelity_errors: Vec<String>,
 }
 
 struct ParallelEntityBatch {
@@ -130,6 +134,7 @@ struct ParallelEntityBatch {
     handle_map: Vec<(u64, u32)>,
     object_queue: VecDeque<Handle>,
     registered_handles: HashSet<u64>,
+    fidelity_errors: Vec<String>,
 }
 
 impl<'a> DwgObjectWriter<'a> {
@@ -236,6 +241,7 @@ impl<'a> DwgObjectWriter<'a> {
             visited_objects: HashSet::new(),
             owner_overrides: std::collections::HashMap::new(),
             linetype_handles: std::collections::HashMap::new(),
+            fidelity_errors: Vec::new(),
         })
     }
 
@@ -247,7 +253,7 @@ impl<'a> DwgObjectWriter<'a> {
     /// `acis_empty=true` in the entity stream; their SAB binary data is
     /// collected into `sab_entries` for writing into the `AcDb:AcDsPrototype_1b`
     /// section.
-    pub fn write(mut self) -> (Vec<u8>, Vec<(u64, u32)>, Option<BoundingBox3D>, Vec<(Handle, Vec<u8>)>) {
+    pub fn write(mut self) -> (Vec<u8>, Vec<(u64, u32)>, Option<BoundingBox3D>, Vec<(Handle, Vec<u8>)>, Vec<String>) {
         // Compute model space extents for VPort view adjustment
         self.model_space_extents = self.compute_model_space_extents();
 
@@ -323,7 +329,7 @@ impl<'a> DwgObjectWriter<'a> {
         // ── Drain object queue ──────────────────────────────────
         self.write_objects();
 
-        (self.output, self.handle_map, self.model_space_extents, self.sab_entries)
+        (self.output, self.handle_map, self.model_space_extents, self.sab_entries, self.fidelity_errors)
     }
 
     /// Whether this version stores ACIS data externally (AcDsPrototype_1b section)
@@ -1907,6 +1913,7 @@ impl<'a> DwgObjectWriter<'a> {
             registered_handles: HashSet::with_capacity(handles.len()),
             owner_overrides: std::collections::HashMap::new(),
             linetype_handles: std::collections::HashMap::new(),
+            fidelity_errors: Vec::new(),
         };
         for handle in handles {
             if let Some(&idx) = worker.document.entity_index.get(handle) {
@@ -1918,6 +1925,7 @@ impl<'a> DwgObjectWriter<'a> {
             handle_map: worker.handle_map,
             object_queue: worker.object_queue,
             registered_handles: worker.registered_handles,
+            fidelity_errors: worker.fidelity_errors,
         }
     }
 
@@ -1939,6 +1947,7 @@ impl<'a> DwgObjectWriter<'a> {
         );
         self.object_queue.extend(batch.object_queue);
         self.registered_handles.extend(batch.registered_handles);
+        self.fidelity_errors.extend(batch.fidelity_errors);
     }
 
     /// Expand entity_handles to include sub-entity handles (vertices, faces,
@@ -2333,7 +2342,7 @@ mod tests {
     fn object_writer_writes_basic_document() {
         let doc = CadDocument::new();
         let writer = DwgObjectWriter::new(&doc).unwrap();
-        let (output, handle_map, _, _) = writer.write();
+        let (output, handle_map, _, _, _) = writer.write();
         // Should have produced some output (at least the 0x0DCA marker)
         assert!(!output.is_empty());
         // Should have recorded some handles (table controls + entries)
@@ -2344,7 +2353,7 @@ mod tests {
     fn object_writer_encodes_dca_marker() {
         let doc = CadDocument::new();
         let writer = DwgObjectWriter::new(&doc).unwrap();
-        let (output, _, _, _) = writer.write();
+        let (output, _, _, _, _) = writer.write();
         // First 4 bytes should be 0x0DCA as little-endian i32
         if output.len() >= 4 {
             let marker = i32::from_le_bytes([output[0], output[1], output[2], output[3]]);
