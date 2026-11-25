@@ -152,6 +152,20 @@ impl<'a> DwgObjectWriter<'a> {
         for entity in document.entities() {
             let h = entity.common().handle.value() + 1;
             if h > max_h { max_h = h; }
+            // Preserved child handles must also be excluded from allocation:
+            // re-issuing a VERTEX/SEQEND handle corrupts the parent's owned
+            // handle list and the block entity chain.
+            match entity {
+                EntityType::Polyline2D(e) => {
+                    for v in &e.vertices {
+                        if v.handle.value() + 1 > max_h { max_h = v.handle.value() + 1; }
+                    }
+                    if let Some(sh) = e.seqend_handle {
+                        if sh.value() + 1 > max_h { max_h = sh.value() + 1; }
+                    }
+                }
+                _ => {}
+            }
         }
         for (handle, _) in &document.objects {
             let h = handle.value() + 1;

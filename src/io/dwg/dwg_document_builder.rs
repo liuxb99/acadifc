@@ -1443,12 +1443,14 @@ impl DwgDocumentBuilder {
                         // handle list. Parallel decoding can otherwise append
                         // vertices in handle order and re-address geometry.
                         if let Some(order) = pending.polyline_vertex_order.remove(&poly_handle) {
-                            assembled.sort_by_key(|vertex| {
-                                order
-                                    .iter()
-                                    .position(|handle| *handle == vertex.handle)
-                                    .unwrap_or(usize::MAX)
-                            });
+                            if let Err(reason) =
+                                restore_polyline2d_vertex_order(&mut assembled, &order)
+                            {
+                                self.notifications.notify(
+                                    NotificationType::Error,
+                                    format!("POLYLINE_2D {:#X}: {}", poly_handle, reason),
+                                );
+                            }
                         }
                         e.vertices = assembled;
                         // Restore the original SEQEND handle: the writer must
@@ -6855,6 +6857,52 @@ fn map_dimension_common(
     base.block_name = maps.block_name(common.block_handle);
 }
 
+/// Restore the source VERTEX chain order from the POLYLINE record's owned
+/// handle list. Sorting is performed only when that list is an exact
+/// permutation of the decoded children; any mismatch is returned as a
+/// fidelity error instead of being silently converted to an ascending sort.
+fn restore_polyline2d_vertex_order(
+    vertices: &mut [crate::entities::polyline::Vertex2D],
+    order: &[Handle],
+) -> std::result::Result<(), String> {
+    let mut position: HashMap<u64, usize> = HashMap::new();
+    let mut duplicate_owned = Vec::new();
+    for (index, handle) in order.iter().enumerate() {
+        if position.insert(handle.value(), index).is_some() {
+            duplicate_owned.push(handle.value());
+        }
+    }
+    let mut actual_positions: HashMap<u64, usize> = HashMap::new();
+    let mut duplicate_actual = Vec::new();
+    for (index, vertex) in vertices.iter().enumerate() {
+        if actual_positions.insert(vertex.handle.value(), index).is_some() {
+            duplicate_actual.push(vertex.handle.value());
+        }
+    }
+    let missing: Vec<u64> = order.iter()
+        .map(|h| h.value())
+        .filter(|h| !actual_positions.contains_key(h))
+        .collect();
+    let extra: Vec<u64> = vertices.iter()
+        .map(|v| v.handle.value())
+        .filter(|h| !position.contains_key(h))
+        .collect();
+    if !duplicate_owned.is_empty()
+        || !duplicate_actual.is_empty()
+        || !missing.is_empty()
+        || !extra.is_empty()
+        || order.len() != vertices.len()
+    {
+        return Err(format!(
+            "child order not restored; owned={} decoded={} duplicate_owned={:?} \
+             duplicate_decoded={:?} missing={:?} extra={:?}",
+            order.len(), vertices.len(), duplicate_owned, duplicate_actual, missing, extra,
+        ));
+    }
+    vertices.sort_by_key(|vertex| position[&vertex.handle.value()]);
+    Ok(())
+}
+
 fn map_entity_common(
     data: &EntityCommonData,
     maps: &HandleMaps,
@@ -6917,4 +6965,52 @@ fn map_entity_common(
     // right modeler entity in object-stream order.
     common.has_ds_data = data.has_ds_data;
     common
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::restore_polyline2d_vertex_order;
+    use crate::entities::polyline::Vertex2D;
+    use crate::types::{Handle, Vector3};
+
+    fn vertices(handles: &[u64]) -> Vec<Vertex2D> {
+        handles.iter().enumerate().map(|(i, h)| {
+            let mut v = Vertex2D::new(Vector3::new(i as f64, 0.0, 0.0));
+            v.handle = Handle::new(*h);
+            v
+        }).collect()
+    }
+
+    #[test]
+    fn exact_permutation_is_restored() {
+        let mut v = vertices(&[11, 12, 13, 14]);
+        let order = [Handle::new(14), Handle::new(11), Handle::new(13), Handle::new(12)];
+        assert!(restore_polyline2d_vertex_order(&mut v, &order).is_ok());
+        assert_eq!(v.iter().map(|x| x.handle.value()).collect::<Vec<_>>(), vec![14, 11, 13, 12]);
+        assert_eq!(v.iter().map(|x| x.location.x as u64).collect::<Vec<_>>(), vec![3, 0, 2, 1]);
+    }
+
+    #[test]
+    fn duplicate_owned_handle_is_reported() {
+        let mut v = vertices(&[11, 12, 13]);
+        let order = [Handle::new(11), Handle::new(11), Handle::new(13)];
+        let err = restore_polyline2d_vertex_order(&mut v, &order).unwrap_err();
+        assert!(err.contains("duplicate_owned"), "{err}");
+    }
+
+    #[test]
+    fn missing_and_extra_children_are_reported() {
+        let mut v = vertices(&[11, 12, 13]);
+        let order = [Handle::new(11), Handle::new(99), Handle::new(13)];
+        let err = restore_polyline2d_vertex_order(&mut v, &order).unwrap_err();
+        assert!(err.contains("missing") && err.contains("extra"), "{err}");
+    }
+
+    #[test]
+    fn length_mismatch_is_reported() {
+        let mut v = vertices(&[11, 12, 13]);
+        let order = [Handle::new(11), Handle::new(12)];
+        let err = restore_polyline2d_vertex_order(&mut v, &order).unwrap_err();
+        assert!(err.contains("owned=2 decoded=3"), "{err}");
+    }
 }

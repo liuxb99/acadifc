@@ -98,3 +98,52 @@ fn ac1018_polyline2d_child_order_survives() {
     assert_eq!(xs, vec![1.0, 2.0, 3.0], "vertex/geometry association must hold");
     assert_eq!(found.seqend_handle, Some(Handle::new(0x522)));
 }
+
+/// A copied polyline must be re-addressed independently: assigning new
+/// handles to the copy (parent + every VERTEX + SEQEND) must not change the
+/// original entity or its child chain.
+#[test]
+fn ac1018_copied_polyline_gets_independent_child_handles() {
+    let mut document = CadDocument::new();
+    document.version = DxfVersion::AC1018;
+
+    let mut original = Polyline2D::new();
+    original.common.handle = Handle::new(0x600);
+    for (handle, x) in [(0x603u64, 1.0), (0x601, 2.0), (0x602, 3.0)] {
+        let mut v = Vertex2D::new(acadrust::Vector3::new(x, x * 10.0, 0.0));
+        v.handle = Handle::new(handle);
+        original.vertices.push(v);
+    }
+    original.seqend_handle = Some(Handle::new(0x604));
+    let original_handles: Vec<u64> = original.vertices.iter().map(|v| v.handle.value()).collect();
+
+    let mut copy = original.clone();
+    copy.common.handle = Handle::new(0x700);
+    for (v, new_h) in copy.vertices.iter_mut().zip([0x703u64, 0x701, 0x702]) {
+        v.handle = Handle::new(new_h);
+    }
+    copy.seqend_handle = Some(Handle::new(0x704));
+
+    document.add_entity(EntityType::Polyline2D(original)).unwrap();
+    document.add_entity(EntityType::Polyline2D(copy)).unwrap();
+
+    let bytes = DwgWriter::write_to_vec(&document).expect("write DWG");
+    let mut reader = DwgReader::from_stream(Cursor::new(bytes));
+    let reopened = reader.read().expect("reopen DWG");
+    let polys: Vec<&Polyline2D> = reopened.entities().filter_map(|e| match e {
+        EntityType::Polyline2D(p) => Some(p),
+        _ => None,
+    }).collect();
+    assert_eq!(polys.len(), 2);
+    let orig = polys.iter().find(|p| p.common.handle == Handle::new(0x600)).unwrap();
+    let copy = polys.iter().find(|p| p.common.handle == Handle::new(0x700)).unwrap();
+
+    assert_eq!(orig.vertices.iter().map(|v| v.handle.value()).collect::<Vec<_>>(), original_handles);
+    assert_eq!(orig.seqend_handle, Some(Handle::new(0x604)));
+    assert_eq!(copy.vertices.iter().map(|v| v.handle.value()).collect::<Vec<_>>(),
+               vec![0x703, 0x701, 0x702]);
+    assert_eq!(copy.seqend_handle, Some(Handle::new(0x704)));
+    // Geometry association must follow the child order in both objects.
+    assert_eq!(orig.vertices.iter().map(|v| v.location.x).collect::<Vec<_>>(), vec![1.0, 2.0, 3.0]);
+    assert_eq!(copy.vertices.iter().map(|v| v.location.x).collect::<Vec<_>>(), vec![1.0, 2.0, 3.0]);
+}

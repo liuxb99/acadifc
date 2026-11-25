@@ -956,9 +956,13 @@ impl<'a> DwgObjectWriter<'a> {
     /// Allocate a new unique handle for sub-entities (vertices, seqend)
     /// that don't have handles assigned by the document.
     pub fn alloc_handle(&mut self) -> Handle {
-        let h = self.next_alloc_handle;
-        self.next_alloc_handle += 1;
-        Handle::new(h)
+        loop {
+            let h = self.next_alloc_handle;
+            self.next_alloc_handle += 1;
+            if !self.registered_handles.contains(&h) {
+                return Handle::new(h);
+            }
+        }
     }
 
     // ── class_type_code ─────────────────────────────────────────────
