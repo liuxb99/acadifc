@@ -986,6 +986,16 @@ pub struct SummaryInfo {
     pub custom_properties: Vec<(String, String)>,
 }
 
+/// Original merged-stream record preserved for same-version raw passthrough.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RawObjectRecord {
+    pub bytes: Vec<u8>,
+    pub handle_bits: i64,
+    pub version: DxfVersion,
+    pub type_code: i16,
+}
+
 /// A CAD document containing all drawing data
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -1129,6 +1139,16 @@ pub struct CadDocument {
     /// corruption; the writer drops them on an incompatible cross-version save.
     /// `None` when not loaded from DWG (new/DXF).
     pub dwg_source_version: Option<DxfVersion>,
+    /// Original object records captured at read time. Serde-skipped: this is
+    /// an encoding cache, not semantic model data exposed to JSON consumers.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_object_records: HashMap<Handle, RawObjectRecord>,
+    /// Enable raw passthrough for eligible, untouched records.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_passthrough_enabled: bool,
+    /// Handles whose semantic value changed and must be re-encoded.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub dirty_handles: std::collections::HashSet<Handle>,
 
     /// Embedded preview/thumbnail image. Populated by the DWG reader from the
     /// file's preview section; the DWG writer embeds it when `Some` and emits an
@@ -1322,6 +1342,9 @@ impl CadDocument {
             reactors_by_handle: HashMap::new(),
             block_entity_handles: HashMap::new(),
             dwg_source_version: None,
+            raw_object_records: HashMap::new(),
+            raw_passthrough_enabled: true,
+            dirty_handles: std::collections::HashSet::new(),
             preview: None,
             acis_sab_handles: Vec::new(),
             raw_acds_data: None,

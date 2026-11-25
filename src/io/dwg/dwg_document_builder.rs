@@ -71,6 +71,7 @@ struct Pass2Output {
     view_rep_refs: HashMap<Handle, Vec<Handle>>,
     section_view_reps: Vec<Handle>,
     section_view_style: Option<crate::entities::SectionViewStyle>,
+    raw_records: HashMap<Handle, crate::document::RawObjectRecord>,
 }
 
 impl Pass2Output {
@@ -100,6 +101,7 @@ impl Pass2Output {
             view_rep_refs: HashMap::new(),
             section_view_reps: Vec::new(),
             section_view_style: None,
+            raw_records: HashMap::new(),
         }
     }
 
@@ -1372,6 +1374,7 @@ impl DwgDocumentBuilder {
                 }
                 if document.section_view_style.is_none() {
                     document.section_view_style = chunk.output.section_view_style.take();
+                document.raw_object_records.extend(chunk.output.raw_records.drain());
                 }
                 document.objects.extend(chunk.output.objects.drain());
                 document.add_loaded_entity_batch(&mut chunk.output.entities);
@@ -2708,6 +2711,18 @@ impl DwgDocumentBuilder {
         class_names: &ClassNames,
         photometric_lighting: bool,
     ) {
+        // Capture the source record verbatim before decoding. This is an
+        // encoding cache used only for same-version raw passthrough of
+        // untouched objects; it never alters the semantic model.
+        document.raw_records.insert(
+            Handle::from(handle),
+            crate::document::RawObjectRecord {
+                bytes: reader.raw_merged_data(),
+                handle_bits: reader.get_handle_bits(),
+                version: self.obj_reader.dxf_version(),
+                type_code: raw_type_code,
+            },
+        );
         // For class-based types (≥500) that weren't resolved via the class
         // map, check the class's is_an_entity flag.  This prevents misreading
         // object data as entity data (different binary layout).

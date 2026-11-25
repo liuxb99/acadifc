@@ -138,6 +138,24 @@ struct ParallelEntityBatch {
 }
 
 impl<'a> DwgObjectWriter<'a> {
+    /// Return the original record bytes for an untouched, same-version object.
+    /// Only AC1018 text updates opt into this MVP; changed handles and any
+    /// cross-version write fall back to the normal semantic serializer.
+    pub(super) fn preserved_raw_record(
+        &self,
+        handle: Handle,
+    ) -> Option<&crate::document::RawObjectRecord> {
+        if !self.document.raw_passthrough_enabled
+            || self.dxf_version != crate::types::DxfVersion::AC1018
+            || self.document.dirty_handles.contains(&handle)
+        {
+            return None;
+        }
+        self.document
+            .raw_object_records
+            .get(&handle)
+            .filter(|record| record.version == self.dxf_version)
+    }
     // ── Constructor ─────────────────────────────────────────────────
 
     /// Create a new object writer for the given document and version.

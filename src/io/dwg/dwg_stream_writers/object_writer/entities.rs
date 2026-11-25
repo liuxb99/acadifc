@@ -20,6 +20,13 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// Write a single entity record.
     pub(super) fn write_entity(&mut self, entity: &EntityType) {
+        let handle = entity.common().handle;
+        if let Some(record) = self.preserved_raw_record(handle) {
+            let bytes = record.bytes.clone();
+            let bits = record.handle_bits;
+            self.register_raw_object(handle, &bytes, bits);
+            return;
+        }
         match entity {
             EntityType::Point(e) => self.write_point(e),
             EntityType::Line(e) => self.write_line(e),
