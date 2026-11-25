@@ -3463,6 +3463,13 @@ impl DwgDocumentBuilder {
                     e.start_width = data.start_width;
                     e.end_width = data.end_width;
                     let h = e.common.handle.value();
+                    // The POLYLINE record's own owned-handle list is the
+                    // authoritative child chain order. Do NOT use the block
+                    // header's owned list (which is ascending by handle) or
+                    // the order in which VERTEX records happen to be read.
+                    pending
+                        .polyline_vertex_order
+                        .insert(h, data.vertex_handles.clone());
                     pending.polylines.push((h, EntityType::Polyline2D(e)));
                 }
                 OBJ_POLYLINE_3D => {

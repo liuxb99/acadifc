@@ -60,3 +60,41 @@ fn ac1018_polyline2d_child_handles_survive() {
 fn ac1027_polyline2d_child_handles_survive() {
     roundtrip(DxfVersion::AC1027);
 }
+
+/// The source DWG can list VERTEX children in an order that is NOT ascending
+/// by handle. The authoritative order is the POLYLINE record's owned-handle
+/// list, not the VERTEX object-map order. Regression for C515C in the AC1018
+/// generic fixture (independent reader order 807266, 807265, 807261, ...).
+#[test]
+fn ac1018_polyline2d_child_order_survives() {
+    let mut document = CadDocument::new();
+    document.version = DxfVersion::AC1018;
+
+    let mut polyline = Polyline2D::new();
+    polyline.common.handle = Handle::new(0x500);
+    // Deliberately unsorted: 0x521, 0x51F, 0x520.
+    for (handle, x) in [(0x521u64, 1.0), (0x51F, 2.0), (0x520, 3.0)] {
+        let mut v = Vertex2D::new(acadrust::Vector3::new(x, x * 10.0, 0.0));
+        v.handle = Handle::new(handle);
+        polyline.vertices.push(v);
+    }
+    polyline.seqend_handle = Some(Handle::new(0x522));
+    document.add_entity(EntityType::Polyline2D(polyline)).unwrap();
+
+    let bytes = DwgWriter::write_to_vec(&document).expect("write DWG");
+    let mut reader = DwgReader::from_stream(Cursor::new(bytes));
+    let reopened = reader.read().expect("reopen DWG");
+    let found = reopened
+        .entities()
+        .find_map(|entity| match entity {
+            EntityType::Polyline2D(p) if p.common.handle == Handle::new(0x500) => Some(p),
+            _ => None,
+        })
+        .expect("polyline must survive");
+
+    let handles: Vec<u64> = found.vertices.iter().map(|v| v.handle.value()).collect();
+    let xs: Vec<f64> = found.vertices.iter().map(|v| v.location.x).collect();
+    assert_eq!(handles, vec![0x521, 0x51F, 0x520], "chain order must be preserved");
+    assert_eq!(xs, vec![1.0, 2.0, 3.0], "vertex/geometry association must hold");
+    assert_eq!(found.seqend_handle, Some(Handle::new(0x522)));
+}
