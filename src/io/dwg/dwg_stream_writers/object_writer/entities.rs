@@ -2445,11 +2445,16 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_double(e.elevation);
         self.writer.write_bit_extrusion(e.normal);
 
-        // Allocate handles for vertices and seqend
-        let vertex_handles: Vec<Handle> = (0..e.vertices.len())
-            .map(|_| self.alloc_handle())
+        // Reuse the source vertex/SEQEND handles when they are known; only
+        // allocate fresh ones for vertices created in memory. Re-addressing a
+        // read-back polyline breaks the block entity chain and every external
+        // reference to those child handles.
+        let vertex_handles: Vec<Handle> = e.vertices.iter()
+            .map(|v| if v.handle.is_null() { self.alloc_handle() } else { v.handle })
             .collect();
-        let seqend_handle = self.alloc_handle();
+        let seqend_handle = e.seqend_handle
+            .filter(|h| !h.is_null())
+            .unwrap_or_else(|| self.alloc_handle());
 
         if self.version.r2004_plus() {
             self.writer.write_bit_long(e.vertices.len() as i32);

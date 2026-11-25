@@ -1947,6 +1947,14 @@ impl<'a> DwgObjectWriter<'a> {
                             if !sh.is_null() { expanded.push(sh); }
                         }
                     }
+                    EntityType::Polyline2D(e) => {
+                        for v in &e.vertices {
+                            if !v.handle.is_null() { expanded.push(v.handle); }
+                        }
+                        if let Some(sh) = e.seqend_handle {
+                            if !sh.is_null() { expanded.push(sh); }
+                        }
+                    }
                     EntityType::Polyline3D(e) => {
                         for v in &e.vertices {
                             if !v.handle.is_null() { expanded.push(v.handle); }

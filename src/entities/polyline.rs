@@ -129,6 +129,10 @@ impl From<i16> for SmoothSurfaceType {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Vertex2D {
+    /// Original DWG handle of this VERTEX child. Preserved across round trips
+    /// so the parent POLYLINE's owned-handle list and the block's entity chain
+    /// keep pointing at the same objects. NULL for vertices created in memory.
+    pub handle: Handle,
     /// Location of the vertex (X, Y in OCS, Z is elevation)
     pub location: Vector3,
     /// Vertex flags
@@ -148,6 +152,7 @@ pub struct Vertex2D {
 impl Vertex2D {
     pub fn new(location: Vector3) -> Self {
         Self {
+            handle: Handle::NULL,
             location,
             flags: VertexFlags::new(),
             start_width: 0.0,
@@ -219,6 +224,8 @@ pub struct Polyline2D {
     pub elevation: f64,
     /// Normal vector (extrusion direction)
     pub normal: Vector3,
+    /// Original DWG SEQEND handle terminating the vertex chain.
+    pub seqend_handle: Option<Handle>,
     /// Vertices
     pub vertices: Vec<Vertex2D>,
 }
@@ -234,6 +241,7 @@ impl Polyline2D {
             thickness: 0.0,
             elevation: 0.0,
             normal: Vector3::new(0.0, 0.0, 1.0),
+            seqend_handle: None,
             vertices: Vec::new(),
         }
     }

@@ -1417,6 +1417,7 @@ impl DwgDocumentBuilder {
                             .filter_map(|v| {
                                 if let PendingVertex::V2D(d) = v {
                                     Some(crate::entities::polyline::Vertex2D {
+                                        handle: d.handle,
                                         location: crate::types::Vector3::new(d.x, d.y, d.z),
                                         flags: crate::entities::polyline::VertexFlags::from_bits(
                                             d.flags,
@@ -1432,6 +1433,12 @@ impl DwgDocumentBuilder {
                                 }
                             })
                             .collect();
+                        // Restore the original SEQEND handle: the writer must
+                        // re-emit it, otherwise every vertex/SEQEND reference in
+                        // the source drawing's block entity chain is re-addressed.
+                        if let Some(sh) = pending.seqends.get(&poly_handle).copied() {
+                            e.seqend_handle = Some(sh);
+                        }
                     }
                     EntityType::Polyline3D(ref mut e) => {
                         e.vertices = verts
