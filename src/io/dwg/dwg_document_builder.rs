@@ -43,6 +43,8 @@ struct PendingPolylines {
     vertices: HashMap<u64, Vec<PendingVertex>>,
     /// SEQEND handle keyed by owner (parent polyline) handle.
     seqends: HashMap<u64, crate::types::Handle>,
+    /// Source child order keyed by parent polyline handle.
+    polyline_vertex_order: HashMap<u64, Vec<crate::types::Handle>>,
     /// Polyline entities awaiting vertex assembly, keyed by their handle.
     polylines: Vec<(u64, EntityType)>,
 }
@@ -1225,6 +1227,7 @@ impl DwgDocumentBuilder {
         let mut pending = PendingPolylines {
             vertices: HashMap::new(),
             seqends: HashMap::new(),
+            polyline_vertex_order: HashMap::new(),
             polylines: Vec::new(),
         };
         // Pending attribute entities keyed by owner (INSERT) handle.
@@ -1371,6 +1374,9 @@ impl DwgDocumentBuilder {
                         .append(&mut vertices);
                 }
                 pending.seqends.extend(chunk.pending.seqends.drain());
+                pending
+                    .polyline_vertex_order
+                    .extend(chunk.pending.polyline_vertex_order.drain());
                 pending.polylines.append(&mut chunk.pending.polylines);
                 for (owner, mut attributes) in chunk.pending_attributes.drain() {
                     pending_attributes
@@ -1412,7 +1418,7 @@ impl DwgDocumentBuilder {
             if let Some(verts) = pending.vertices.remove(&poly_handle) {
                 match &mut entity {
                     EntityType::Polyline2D(ref mut e) => {
-                        e.vertices = verts
+                        let mut assembled: Vec<crate::entities::polyline::Vertex2D> = verts
                             .into_iter()
                             .filter_map(|v| {
                                 if let PendingVertex::V2D(d) = v {
@@ -1433,6 +1439,18 @@ impl DwgDocumentBuilder {
                                 }
                             })
                             .collect();
+                        // Restore the source chain order from the parent's owned
+                        // handle list. Parallel decoding can otherwise append
+                        // vertices in handle order and re-address geometry.
+                        if let Some(order) = pending.polyline_vertex_order.remove(&poly_handle) {
+                            assembled.sort_by_key(|vertex| {
+                                order
+                                    .iter()
+                                    .position(|handle| *handle == vertex.handle)
+                                    .unwrap_or(usize::MAX)
+                            });
+                        }
+                        e.vertices = assembled;
                         // Restore the original SEQEND handle: the writer must
                         // re-emit it, otherwise every vertex/SEQEND reference in
                         // the source drawing's block entity chain is re-addressed.

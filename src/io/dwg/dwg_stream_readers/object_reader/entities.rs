@@ -2112,6 +2112,10 @@ pub struct Polyline2DData {
     pub elevation: f64,
     pub normal: Vector3,
     pub owned_count: i32,
+    /// Child VERTEX handles in the order stored by the source DWG.
+    pub vertex_handles: Vec<crate::types::Handle>,
+    /// Handle of the SEQEND that terminates the child chain.
+    pub seqend_handle: crate::types::Handle,
 }
 
 #[derive(Debug, Clone)]
@@ -2874,6 +2878,19 @@ pub fn read_polyline2d(reader: &mut DwgMergedReader, version: DwgVersion) -> Pol
     } else {
         0
     };
+    // Read the owned-handle list before the SEQEND so the original child order
+    // can be restored. R13-R15 stores only first/last; R2004+ stores every
+    // vertex handle.
+    let mut vertex_handles = Vec::new();
+    if version.r13_15_only() {
+        let _first = reader.read_handle();
+        let _last = reader.read_handle();
+    } else if version.r2004_plus() && owned_count > 0 {
+        for _ in 0..owned_count {
+            vertex_handles.push(crate::types::Handle::from(reader.read_handle()));
+        }
+    }
+    let seqend_handle = crate::types::Handle::from(reader.read_handle());
     Polyline2DData {
         flags,
         smooth_surface,
@@ -2883,6 +2900,8 @@ pub fn read_polyline2d(reader: &mut DwgMergedReader, version: DwgVersion) -> Pol
         elevation,
         normal,
         owned_count,
+        vertex_handles,
+        seqend_handle,
     }
 }
 
