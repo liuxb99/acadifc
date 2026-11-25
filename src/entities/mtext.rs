@@ -325,13 +325,8 @@ impl MText {
 
     /// Whether the cached extents still describe the authored text.
     pub fn extents_are_valid(&self) -> bool {
-        if self.extents_dirty { return false; }
-        if let Some(v) = &self.source_value { if v != &self.value { return false; } }
-        if let Some(v) = self.source_height { if v != self.height { return false; } }
-        if let Some(v) = self.source_rect_width { if v != self.rectangle_width { return false; } }
-        if let Some(ref v) = self.source_style { if v != &self.style { return false; } }
-        if let Some(v) = self.source_line_spacing { if v != self.line_spacing_factor { return false; } }
-        true
+        // Only an explicit, authorized mutation invalidates cached extents.
+        !self.extents_dirty
     }
 }
 
