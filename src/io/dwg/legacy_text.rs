@@ -15,6 +15,8 @@
 //! byte instead of letting `encoding_rs` emit `&#NNN;`.
 
 use encoding_rs::Encoding;
+use std::collections::HashMap;
+use std::sync::RwLock;
 
 /// First code point of the private-use marker pair.
 const MARKER_BASE: u32 = 0xE000;
@@ -83,19 +85,84 @@ pub(crate) fn encode_legacy_text(encoding: &'static Encoding, text: &str) -> Vec
     out
 }
 
-/// Encode an ordinary run.  Unencodable characters become `?` instead of the
-/// HTML entity `&#NNN;` that `encoding_rs` would otherwise emit verbatim.
+/// Some legacy decoders (notably Big5) map byte pairs to supplementary-plane
+/// CJK characters that their encoder cannot encode back. `encoding_rs` then
+/// emits `&#NNN;` (or, after our earlier fix, `?`), which silently changes the
+/// value. Build the decoder's own reverse map so the original byte pair can be
+/// restored exactly. This is derived from the code page itself, never from a
+/// drawing-specific string.
+fn reverse_byte_map(encoding: &'static Encoding) -> HashMap<char, Vec<u8>> {
+    let mut map = HashMap::new();
+    for first in 0u16..=0xFF {
+        let single = [first as u8];
+        let (decoded, _, had_errors) = encoding.decode(&single);
+        if !had_errors {
+            if let Some(ch) = decoded.chars().next() {
+                if decoded.chars().count() == 1 {
+                    map.entry(ch).or_insert_with(|| single.to_vec());
+                }
+            }
+        }
+        for second in 0u16..=0xFF {
+            let pair = [first as u8, second as u8];
+            let (decoded, _, had_errors) = encoding.decode(&pair);
+            if !had_errors && decoded.chars().count() == 1 {
+                let ch = decoded.chars().next().unwrap();
+                map.entry(ch).or_insert_with(|| pair.to_vec());
+            }
+        }
+    }
+    map
+}
+
+fn reverse_maps() -> &'static RwLock<HashMap<String, HashMap<char, Vec<u8>>>> {
+    static MAPS: std::sync::OnceLock<RwLock<HashMap<String, HashMap<char, Vec<u8>>>>> =
+        std::sync::OnceLock::new();
+    MAPS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn reverse_bytes(encoding: &'static Encoding, ch: char) -> Option<Vec<u8>> {
+    let key = encoding.name().to_string();
+    if let Some(map) = reverse_maps().read().unwrap().get(&key) {
+        return map.get(&ch).cloned();
+    }
+    let map = reverse_byte_map(encoding);
+    let result = map.get(&ch).cloned();
+    reverse_maps()
+        .write()
+        .unwrap()
+        .entry(key)
+        .or_insert(map);
+    result
+}
+
+/// Encode an ordinary run without numeric-entity fallback or silent `?`.
 fn encode_plain(encoding: &'static Encoding, text: &str) -> Vec<u8> {
     let (encoded, _, had_errors) = encoding.encode(text);
     if !had_errors {
         return encoded.into_owned();
     }
-    let mut safe = String::with_capacity(text.len());
+    let mut out = Vec::with_capacity(text.len());
+    let mut run = String::with_capacity(text.len());
     for ch in text.chars() {
-        let (_, _, err) = encoding.encode(&ch.to_string());
-        safe.push(if err { '?' } else { ch });
+        let (one, _, err) = encoding.encode(&ch.to_string());
+        if !err {
+            run.push(ch);
+            continue;
+        }
+        if !run.is_empty() {
+            out.extend_from_slice(encoding.encode(&run).0.as_ref());
+            run.clear();
+        }
+        match reverse_bytes(encoding, ch) {
+            Some(bytes) => out.extend_from_slice(&bytes),
+            None => out.push(b'?'),
+        }
     }
-    encoding.encode(&safe).0.into_owned()
+    if !run.is_empty() {
+        out.extend_from_slice(encoding.encode(&run).0.as_ref());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -150,4 +217,14 @@ mod tests {
         assert!(!found.name.contains("&#"), "numeric entity fallback must never be written");
     }
 
+    #[test]
+    fn supplementary_big5_character_round_trips_bit_for_bit() {
+        // Big5 decoder maps 0x8745 to U+27267, but encoding_rs' Big5 encoder
+        // cannot encode that character back. The reverse map must recover the
+        // original bytes instead of writing `?` or `&#NNN;`.
+        let bytes = [0x87, 0x45];
+        let text = decode_legacy_text(encoding_rs::BIG5, &bytes);
+        assert_eq!(text.chars().count(), 1);
+        assert_eq!(encode_legacy_text(encoding_rs::BIG5, &text), bytes);
+    }
 }
