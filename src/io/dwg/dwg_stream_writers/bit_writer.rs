@@ -70,8 +70,7 @@ impl DwgBitWriter {
 
     /// Encode text using the document's legacy text code page.
     pub fn encode_legacy_text(&self, text: &str) -> Vec<u8> {
-        let (encoded, _, _) = self.encoding.encode(text);
-        encoded.into_owned()
+        crate::io::dwg::legacy_text::encode_legacy_text(self.encoding, text)
     }
 
     /// Get the DWG version.
@@ -596,7 +595,7 @@ impl DwgBitWriter {
             }
         } else {
             // Pre-R2007: Write byte count, then encoded bytes
-            let (encoded, _, _) = self.encoding.encode(text);
+            let encoded = crate::io::dwg::legacy_text::encode_legacy_text(self.encoding, text);
             self.write_bit_short(encoded.len() as i16);
             self.write_bytes(&encoded);
         }

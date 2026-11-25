@@ -66,7 +66,7 @@ pub(crate) fn encode_values_with_encoding(
                 b.extend_from_slice(&u.to_le_bytes());
             }
         } else {
-            let (encoded, _, _) = encoding.encode(s);
+            let encoded = crate::io::dwg::legacy_text::encode_legacy_text(encoding, s);
             b.push(encoded.len() as u8);
             b.extend_from_slice(&code_page.to_le_bytes());
             b.extend_from_slice(&encoded);
@@ -170,10 +170,10 @@ pub(crate) fn decode_values(
                     i += 2;
                     let slice = bytes.get(i..i + n)?;
                     i += n;
-                    crate::io::dxf::code_page::encoding_from_dwg_code_page(code_page)
-                        .decode(slice)
-                        .0
-                        .into_owned()
+                    crate::io::dwg::legacy_text::decode_legacy_text(
+                        crate::io::dxf::code_page::encoding_from_dwg_code_page(code_page),
+                        slice,
+                    )
                 };
                 values.push(XDataValue::String(s));
             }

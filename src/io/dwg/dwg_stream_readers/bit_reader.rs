@@ -100,8 +100,7 @@ impl DwgBitReader {
 
     /// Decode bytes using the document's legacy text code page.
     pub fn decode_legacy_text(&self, bytes: &[u8]) -> String {
-        let (decoded, _, _) = self.encoding.decode(bytes);
-        decoded.into_owned()
+        crate::io::dwg::legacy_text::decode_legacy_text(self.encoding, bytes)
     }
 
     /// Get the DWG version.
@@ -763,8 +762,7 @@ impl DwgBitReader {
                 return String::new();
             }
             let bytes = self.read_bytes(length as usize);
-            let (decoded, _, _) = self.encoding.decode(&bytes);
-            decoded.replace('\0', "").to_string()
+            crate::io::dwg::legacy_text::decode_legacy_text(self.encoding, &bytes)
         }
     }
 
