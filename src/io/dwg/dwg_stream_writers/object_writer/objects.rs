@@ -1233,17 +1233,19 @@ impl<'a> DwgObjectWriter<'a> {
         match self.document.objects.get(handle) {
             None => false,
             Some(obj) => match obj {
+                // `write_visual_style` / `write_material` serialize these for
+                // every supported version (with a legacy field layout before
+                // R2010 / R2007) whenever the class is present in the CLASSES
+                // section. The old version gates predate that writer support:
+                // they made this predicate report "unwritable" for objects
+                // that the object stream *does* emit, so dictionary entries
+                // were silently dropped while the objects survived the round
+                // trip. Keep the predicate in sync with the writer instead.
                 ObjectType::VisualStyle(_) => {
-                    (self.version.r2007_plus()
-                        || (self.version.r13_14_only()
-                            && self.document.dwg_source_version == Some(self.dxf_version)))
-                        && self.document.classes.get_by_name("VISUALSTYLE").is_some()
+                    self.document.classes.get_by_name("VISUALSTYLE").is_some()
                 }
                 ObjectType::Material(_) => {
-                    (self.version.r2007_plus()
-                        || (self.version.r13_14_only()
-                            && self.document.dwg_source_version == Some(self.dxf_version)))
-                        && self.document.classes.get_by_name("MATERIAL").is_some()
+                    self.document.classes.get_by_name("MATERIAL").is_some()
                 }
                 ObjectType::TableStyle(_) => {
                     self.document.classes.get_by_name("TABLESTYLE").is_some()
