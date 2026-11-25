@@ -774,8 +774,9 @@ impl<'a> DwgObjectWriter<'a> {
 
         // Entry name
         self.writer.write_variable_text(&ltype.name);
-        // Xref
-        self.write_xref_dependant_bit();
+        // Xref-dependent flag — preserve the value read from the source DWG
+        // instead of unconditionally writing false (round-trip fidelity).
+        self.write_xref_dependant_bit_value(ltype.xref_dependent);
         // Description
         self.writer.write_variable_text(&ltype.description);
         // Pattern length
