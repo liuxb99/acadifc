@@ -714,14 +714,17 @@ pub fn dirty_closure_with_index(
             if dirty.contains(referrer) {
                 continue;
             }
-            // Only containment changes the record bytes. A changed style,
-            // layer or linetype target does not alter the referring record (it
-            // stores the handle), so pointer edges must not cascade a rewrite —
-            // otherwise editing one entity inside a block would re-encode every
-            // INSERT that references the block.
-            let hit = targets
-                .iter()
-                .any(|(t, kind)| *kind == EdgeKind::Structural && dirty.contains(t));
+            // Only a MEMBERSHIP change alters a container's bytes: a block
+            // header or table control lists its members, so adding/removing one
+            // requires a rewrite. Merely modifying a member does not (the list
+            // is unchanged), and a pointer target changing does not either (the
+            // referrer stores just the handle). Cascading on every dirty target
+            // is what made one edit rewrite whole drawings.
+            let hit = targets.iter().any(|(target, kind)| {
+                *kind == EdgeKind::Structural
+                    && dirty.contains(target)
+                    && (index.new.contains(target) || index.deleted.contains(target))
+            });
             if hit && dirty.insert(*referrer) {
                 changed = true;
             }
