@@ -256,9 +256,11 @@ pub fn build_dependencies_with_index(
         if let Some(x) = common.xdictionary_handle {
             graph.pointer(h, x, index);
         }
+        // Keep the *original* layer handle even when that table entry was
+        // dropped (duplicate names), so the deleted-reference sweep below can
+        // see that this entity must be re-encoded instead of replayed verbatim.
         let layer_h = common
             .layer_handle
-            .filter(|lh| index.known.contains(lh))
             .or_else(|| document.layers.get(&common.layer).map(|l| l.handle));
         if let Some(lh) = layer_h {
             graph.pointer(h, lh, index);
