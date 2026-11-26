@@ -28,7 +28,11 @@ impl<'a> DwgObjectWriter<'a> {
             EntityType::Polyline2D(_) | EntityType::Polyline3D(_)
             | EntityType::PolyfaceMesh(_) | EntityType::PolygonMesh(_)
         ) || matches!(entity, EntityType::Insert(i) if i.has_attributes());
-        if !owns_children {
+        // Raw replay preserves relative handle references verbatim. Layer
+        // names decoded from \U+XXXX escapes can change the object-map layout
+        // when re-encoded, so prefer the semantic writer for those entities.
+        let raw_safe_layer = entity.common().layer.is_ascii();
+        if !owns_children && raw_safe_layer {
         if let Some(record) = self.preserved_raw_record(handle) {
             let bytes = record.bytes.clone();
             let bits = record.handle_bits;
@@ -113,6 +117,7 @@ impl<'a> DwgObjectWriter<'a> {
     // â”€â”€ Helper: write entity preamble â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn entity_preamble(&mut self, type_code: i16, c: &EntityCommon) {
+        self.pending_layer_handle = c.layer_handle;
         self.write_common_entity_data(
             type_code,
             c.handle,

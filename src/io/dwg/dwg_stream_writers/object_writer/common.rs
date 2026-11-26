@@ -435,11 +435,11 @@ impl<'a> DwgObjectWriter<'a> {
         if self.version.r13_14_only() {
             // Layer handle (HANDLE: hard pointer)
             let layer_h = self
-                .document
-                .layers
-                .get(layer)
-                .map(|l| l.handle)
-                .unwrap_or(Handle::NULL);
+            .pending_layer_handle
+            .take()
+            .filter(|h| !h.is_null())
+            .or_else(|| self.document.layers.get(layer).map(|l| l.handle))
+            .unwrap_or(Handle::NULL);
             self.writer
                 .write_handle(DwgReferenceType::HardPointer, layer_h.value());
 
@@ -522,10 +522,10 @@ impl<'a> DwgObjectWriter<'a> {
 
         // ── R2000+: Layer handle (HANDLE: hard pointer) ──
         let layer_h = self
-            .document
-            .layers
-            .get(layer)
-            .map(|l| l.handle)
+            .pending_layer_handle
+            .take()
+            .filter(|h| !h.is_null())
+            .or_else(|| self.document.layers.get(layer).map(|l| l.handle))
             .unwrap_or(Handle::NULL);
         self.writer
             .write_handle(DwgReferenceType::HardPointer, layer_h.value());

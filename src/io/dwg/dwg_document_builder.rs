@@ -6949,6 +6949,9 @@ fn map_entity_common(
     common.invisible = data.invisible;
     common.linetype_scale = data.linetype_scale;
     common.layer = maps.layer_name(data.layer_handle);
+    if data.layer_handle != 0 {
+        common.layer_handle = Some(Handle::from(data.layer_handle));
+    }
     // Line weight (raw DWG index byte → LineWeight)
     common.line_weight = crate::types::LineWeight::from_dwg_index(data.line_weight);
     // Reactors

@@ -71,6 +71,11 @@ fn main() {
         }
     }
 
+
+    if let Some(e) = doc.get_entity(acadrust::types::Handle::new(0xC43D0)) {
+        println!("C43D0 layer={:?} layer_handle={:?}", e.common().layer, e.common().layer_handle);
+    }
+
     println!("--- SHAPE ENTITIES ---");
     let mut shape_entities = 0usize;
     for entity in doc.entities() {

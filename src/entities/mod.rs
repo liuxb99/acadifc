@@ -272,6 +272,10 @@ pub struct EntityCommon {
     pub handle: Handle,
     /// Layer name
     pub layer: String,
+    /// Original layer table record handle. Needed when a drawing contains
+    /// duplicate layer names (possible in AC1018) and name lookup is ambiguous.
+    #[cfg_attr(feature = "serde", serde(skip, default))]
+    pub layer_handle: Option<crate::types::Handle>,
     /// Color
     pub color: Color,
     /// Line weight
@@ -368,6 +372,7 @@ impl EntityCommon {
             plotstyle_handle: None,
             entity_mode: None,
             has_ds_data: false,
+            layer_handle: None,
         }
     }
 

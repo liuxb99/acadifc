@@ -129,6 +129,8 @@ pub struct DwgObjectWriter<'a> {
     pub(super) fidelity_errors: Vec<String>,
     /// Expanded dirty set for same-version raw passthrough.
     pub(super) passthrough_dirty: std::collections::HashSet<Handle>,
+    /// Layer handle captured from EntityCommon by entity_preamble.
+    pub(super) pending_layer_handle: Option<Handle>,
 }
 
 struct ParallelEntityBatch {
@@ -265,6 +267,7 @@ impl<'a> DwgObjectWriter<'a> {
             linetype_handles: std::collections::HashMap::new(),
             fidelity_errors: Vec::new(),
             passthrough_dirty: std::collections::HashSet::new(),
+            pending_layer_handle: None,
         })
     }
 
@@ -1961,6 +1964,7 @@ impl<'a> DwgObjectWriter<'a> {
             linetype_handles: std::collections::HashMap::new(),
             fidelity_errors: Vec::new(),
             passthrough_dirty: std::collections::HashSet::new(),
+            pending_layer_handle: None,
         };
         for handle in handles {
             if let Some(&idx) = worker.document.entity_index.get(handle) {

@@ -60,4 +60,11 @@ fn real_ac1018_linetypes_and_layer_names_survive_noop() {
         after.get_entity(xref_entity).is_some(),
         "no-op dropped an entity owned by an xref block"
     );
+
+    // Duplicate layer names must not re-address entities to another record.
+    let arc = acadrust::types::Handle::new(0xC43D0);
+    let before_handle = before.get_entity(arc).and_then(|e| e.common().layer_handle);
+    let after_handle = after.get_entity(arc).and_then(|e| e.common().layer_handle);
+    assert_eq!(before_handle, Some(acadrust::types::Handle::new(0xC4069)));
+    assert_eq!(after_handle, before_handle, "duplicate layer name re-addressed entity");
 }
