@@ -1961,6 +1961,9 @@ impl<'a> DwgObjectWriter<'a> {
             .collect();
 
         for br in &block_records {
+            if std::env::var_os("DBG_BLOCK").is_some() && br.handle.value() > 0xFF000000 {
+                eprintln!("DBG_BLOCK iter {:X} {} members={}", br.handle.value(), br.name, br.entity_handles.len());
+            }
             // An xref block record references an external drawing: its contents
             // live in that file, not here. Some hosts merge the resolved xref
             // geometry into the block record for display; serializing those as
@@ -2277,7 +2280,13 @@ impl<'a> DwgObjectWriter<'a> {
         // structural (container → member) edges, so a replay here can only
         // happen for a block whose member list is unchanged.
         let _ = write_owned_count;
+        if std::env::var_os("DBG_BLOCK").is_some() && record.handle.value() > 0xFF000000 {
+            eprintln!("DBG_BLOCK header_enter {:X} {}", record.handle.value(), record.name);
+        }
         if self.try_replay_raw(record.handle) {
+            if std::env::var_os("DBG_BLOCK").is_some() {
+                eprintln!("DBG_BLOCK header_replayed {:X}", record.handle.value());
+            }
             return;
         }
 

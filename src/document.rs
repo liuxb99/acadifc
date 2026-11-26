@@ -1205,6 +1205,11 @@ pub struct CadDocument {
     /// Enable raw passthrough for eligible, untouched records.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub raw_passthrough_enabled: bool,
+    /// Handles reserved by a caller before they are inserted (for example a
+    /// patch that names the handle of every entity it is about to create).
+    /// Allocation must never re-issue one of these.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub reserved_handles: std::collections::HashSet<Handle>,
     /// Handles the edit contract explicitly deleted. Used to separate a real
     /// deletion from a source record the semantic model never represented
     /// (e.g. a duplicate-named table entry), which must be preserved.
@@ -1422,6 +1427,7 @@ impl CadDocument {
             passthrough_report: PassthroughReport::default(),
             read_audit: None,
             source_handles: std::collections::HashSet::new(),
+            reserved_handles: std::collections::HashSet::new(),
             deleted_handles: std::collections::HashSet::new(),
             dirty_handles: std::collections::HashSet::new(),
             preview: None,
@@ -1936,8 +1942,34 @@ impl CadDocument {
         if self.header.handle_seed > self.next_handle {
             self.next_handle = self.header.handle_seed;
         }
-        let handle = Handle::new(self.next_handle);
-        self.next_handle += 1;
+        // Never re-issue a handle that is already in use. A caller may have
+        // assigned an explicit high handle (e.g. a patch `to_handle`) after the
+        // counter was last advanced; without this guard a later allocation
+        // could collide with it and silently overwrite a record.
+        let mut value = self.next_handle;
+        let mut guard = 0u64;
+        loop {
+            let candidate = Handle::new(value);
+            let occupied = self.entity_index.contains_key(&candidate)
+                || self.objects.contains_key(&candidate)
+                || self.block_records.iter().any(|record| record.handle == candidate)
+                || self.layers.iter().any(|entry| entry.handle == candidate)
+                || self.text_styles.iter().any(|entry| entry.handle == candidate)
+                || self.line_types.iter().any(|entry| entry.handle == candidate)
+                || self.dim_styles.iter().any(|entry| entry.handle == candidate)
+                || self.raw_object_records.contains_key(&candidate)
+                || self.reserved_handles.contains(&candidate);
+            if !occupied {
+                break;
+            }
+            value += 1;
+            guard += 1;
+            if guard > 1_000_000 {
+                break;
+            }
+        }
+        let handle = Handle::new(value);
+        self.next_handle = value + 1;
         // Keep HANDSEED in sync — DWG header requires this to be ≥ next_handle
         self.header.handle_seed = self.next_handle;
         handle
