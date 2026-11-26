@@ -64,6 +64,13 @@ fn main() {
         zero, null_style
     );
 
+
+    for br in doc.block_records.iter() {
+        if br.name == "map" || br.handle == acadrust::types::Handle::new(0xC31F2) {
+            println!("BLOCKRECORD {:?} handle={} flags={:?} xref={} xref_overlay={} members={}", br.name, br.handle.value(), br.flags, br.flags.is_xref, br.flags.is_xref_overlay, br.entity_handles.len());
+        }
+    }
+
     println!("--- SHAPE ENTITIES ---");
     let mut shape_entities = 0usize;
     for entity in doc.entities() {

@@ -1787,7 +1787,11 @@ impl<'a> DwgObjectWriter<'a> {
                 .copied()
                 .filter(|h| self.document.entity_index.contains_key(h))
                 .collect();
-            let entity_handles_for_header = if is_xref {
+            // An xref block with no local geometry still uses the empty list;
+            // when the source DWG actually contains entities in the block
+            // (merged xref geometry), they must be written or they are lost.
+            let has_local_geometry = !live_handles.is_empty();
+            let entity_handles_for_header = if is_xref && !has_local_geometry {
                 Vec::new()
             } else {
                 let expanded = self.expand_entity_handles(&live_handles);
@@ -1814,10 +1818,10 @@ impl<'a> DwgObjectWriter<'a> {
                     None => expanded,
                 }
             };
-            self.write_block_header_with_handles(br, &entity_handles_for_header);
+            self.write_block_header_with_handles(br, &entity_handles_for_header, !is_xref || has_local_geometry);
             self.write_block_begin(br);
 
-            if !is_xref {
+            if !is_xref || has_local_geometry {
                 // Look up entities by handle from the document. Iterate the
                 // dangling-filtered list so the pre-R2004 prev/next links
                 // never point at a handle that is not in the stream.
@@ -2049,7 +2053,12 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     /// Write a BLOCK_HEADER (block record) object with explicit entity handles.
-    fn write_block_header_with_handles(&mut self, record: &BlockRecord, entity_handles: &[Handle]) {
+    fn write_block_header_with_handles(
+        &mut self,
+        record: &BlockRecord,
+        entity_handles: &[Handle],
+        write_owned_count: bool,
+    ) {
 
         self.write_common_non_entity_data(
             common::OBJ_BLOCK_HEADER,
@@ -2080,7 +2089,7 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // R2004+: owned object count (non-xref)
-        if self.version.r2004_plus() && !record.flags.is_xref && !record.flags.is_xref_overlay {
+        if self.version.r2004_plus() && write_owned_count {
             self.writer.write_bit_long(entity_handles.len() as i32);
         }
 
@@ -2151,7 +2160,7 @@ impl<'a> DwgObjectWriter<'a> {
         // the format — the owned-object count is skipped above, so the reader
         // reads zero handles here. Writing any would desync the handle stream
         // and corrupt the block record on read, matching the R13-R2000 guard.
-        if self.version.r2004_plus() && !record.flags.is_xref && !record.flags.is_xref_overlay {
+        if self.version.r2004_plus() && write_owned_count {
             for h in entity_handles {
                 self.writer
                     .write_handle(DwgReferenceType::HardOwnership, h.value());

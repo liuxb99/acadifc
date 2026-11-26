@@ -49,4 +49,15 @@ fn real_ac1018_linetypes_and_layer_names_survive_noop() {
         doc.line_types.iter().map(|lt| format!("{lt:?}")).collect()
     };
     assert_eq!(describe(&before), describe(&after), "linetypes changed after no-op");
+
+    // The merged xref geometry entity from the real drawing must survive.
+    let xref_entity = acadrust::types::Handle::new(0xF100BFC);
+    assert!(
+        before.get_entity(xref_entity).is_some(),
+        "fixture no longer contains the merged xref entity"
+    );
+    assert!(
+        after.get_entity(xref_entity).is_some(),
+        "no-op dropped an entity owned by an xref block"
+    );
 }
