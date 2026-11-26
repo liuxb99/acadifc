@@ -1958,6 +1958,11 @@ impl CadDocument {
                 || self.line_types.iter().any(|entry| entry.handle == candidate)
                 || self.dim_styles.iter().any(|entry| entry.handle == candidate)
                 || self.raw_object_records.contains_key(&candidate)
+                // A handle the source file already used must never be issued to
+                // a new object: the source record (even when it is preserved
+                // only as raw bytes, or is a BLOCK/ENDBLK marker outside the
+                // semantic model) still occupies it in the output.
+                || self.source_handles.contains(&candidate)
                 || self.reserved_handles.contains(&candidate);
             if !occupied {
                 break;
