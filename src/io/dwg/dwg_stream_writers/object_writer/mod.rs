@@ -2324,18 +2324,22 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_bit_long(entity_handles.len() as i32);
         }
 
-        // Base point (from Block entity if found)
-        let base_pt = record
-            .entity_handles
-            .iter()
-            .find_map(|eh| {
-                if let Some(EntityType::Block(b)) = self.document.entity_index.get(eh).map(|&idx| self.document.entities[idx].as_ref()) {
-                    Some(b.base_point)
-                } else {
-                    None
+        // Base point. The block *record* carries the authoritative value read
+        // from the source header; the BLOCK marker is only a fallback for
+        // programmatically created blocks, where the record may still be zero.
+        // (Preferring the marker's copy silently reset every block whose header
+        // had to be rewritten to the origin.)
+        let mut base_pt = record.base_point;
+        if base_pt == crate::types::Vector3::ZERO {
+            if let Some(point) = record.entity_handles.iter().find_map(|eh| {
+                match self.document.entity_index.get(eh).map(|&idx| self.document.entities[idx].as_ref()) {
+                    Some(EntityType::Block(b)) => Some(b.base_point),
+                    _ => None,
                 }
-            })
-            .unwrap_or(crate::types::Vector3::ZERO);
+            }) {
+                base_pt = point;
+            }
+        }
         self.writer.write_3bit_double(base_pt);
 
         // Xref path
