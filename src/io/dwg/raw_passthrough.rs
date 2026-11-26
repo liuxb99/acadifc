@@ -662,6 +662,19 @@ pub fn dirty_closure_with_index(
     index: &HandleIndex,
 ) -> std::result::Result<HashSet<Handle>, String> {
     let mut dirty: HashSet<Handle> = document.dirty_handles.iter().copied().collect();
+    // Any record that references a source handle which no longer exists must be
+    // re-encoded: replaying it verbatim would emit a dangling handle. This is
+    // how duplicate-name table entries (AC1018 allows them) get resolved — the
+    // entity is rewritten so its reference is re-addressed to the surviving
+    // entry instead of pointing at a record that is not written.
+    for (referrer, targets) in &graph.edges {
+        if targets
+            .iter()
+            .any(|(target, _)| index.deleted.contains(target))
+        {
+            dirty.insert(*referrer);
+        }
+    }
     // Fail closed when a caller-marked dirty handle is a source object whose
     // bytes were lost: we cannot prove the rewrite is faithful.
     if !index.missing_raw.is_empty() {
