@@ -57,17 +57,11 @@ fn dwg_block_name(name: &str) -> &str {
             }
         }
     }
-    // Generic anonymous: *<alpha><digits> → *<alpha>
-    if name.starts_with('*') && name.len() >= 2 {
-        let alpha_end = name[1..]
-            .find(|c: char| !c.is_ascii_alphabetic())
-            .map(|p| 1 + p)
-            .unwrap_or(name.len());
-        let rest = &name[alpha_end..];
-        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
-            return &name[..alpha_end];
-        }
-    }
+    // Other anonymous blocks (AutoCAD's *D / *U / *H / *T families) carry a
+    // unique numeric suffix that IS the identity of the block. Stripping it
+    // collapsed every anonymous block to the same name, so a drawing with two
+    // copied dimensions lost one of them on read-back (the table de-duplicates
+    // by name). The DWG block name is a string; keep it verbatim.
     name
 }
 
