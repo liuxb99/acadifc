@@ -1961,7 +1961,6 @@ impl<'a> DwgObjectWriter<'a> {
             .collect();
 
         for br in &block_records {
-            }
             // An xref block record references an external drawing: its contents
             // live in that file, not here. Some hosts merge the resolved xref
             // geometry into the block record for display; serializing those as
