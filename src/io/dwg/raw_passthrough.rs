@@ -28,8 +28,14 @@ pub enum EdgeKind {
     /// Container → contained (BLOCK_RECORD → entity, DICTIONARY → entry,
     /// control → table entry, INSERT → ATTRIB/SEQEND, POLYLINE → VERTEX).
     Structural,
-    /// Plain handle reference (entity → layer/style/linetype/dimstyle).
+    /// Plain handle reference whose target content the referrer depends on
+    /// (entity → layer/style/linetype/dimstyle): a change propagates.
     Pointer,
+    /// Owner back-reference (entity → owner block record, object → owner
+    /// dictionary). The owner changing does NOT change the child's bytes, so a
+    /// rewrite must not cascade down the ownership tree — only up, through the
+    /// structural `container → member` edges.
+    Ownership,
 }
 
 /// Presence and provenance of every handle in the document.
@@ -208,6 +214,10 @@ impl DependencyGraph {
         self.push(from, to, EdgeKind::Pointer, index);
     }
 
+    fn ownership(&mut self, from: Handle, to: Handle, index: &HandleIndex) {
+        self.push(from, to, EdgeKind::Ownership, index);
+    }
+
     fn structural(&mut self, from: Handle, to: Handle, index: &HandleIndex) {
         self.push(from, to, EdgeKind::Structural, index);
     }
@@ -239,7 +249,7 @@ pub fn build_dependencies_with_index(
             continue;
         }
         let common = entity.common();
-        graph.structural(h, common.owner_handle, index);
+        graph.ownership(h, common.owner_handle, index);
         for r in &common.reactors {
             graph.pointer(h, *r, index);
         }
@@ -412,7 +422,7 @@ pub fn build_dependencies_with_index(
     // ── Non-graphical objects ──────────────────────────────────────
     for (h, obj) in &document.objects {
         let h = *h;
-        graph.structural(h, object_owner(obj), index);
+        graph.ownership(h, object_owner(obj), index);
         match obj {
             ObjectType::Dictionary(dict) => {
                 for (_, target) in &dict.entries {
@@ -674,13 +684,48 @@ pub fn dirty_closure_with_index(
             if dirty.contains(referrer) {
                 continue;
             }
-            let hit = targets.iter().find(|(t, _)| dirty.contains(t));
-            if hit.is_some() && dirty.insert(*referrer) {
+            let hit = targets
+                .iter()
+                .any(|(t, kind)| *kind != EdgeKind::Ownership && dirty.contains(t));
+            if hit && dirty.insert(*referrer) {
                 changed = true;
             }
         }
     }
     Ok(dirty)
+}
+
+/// Explain how each handle entered the closure: returns (handle, cause).
+/// Used for auditing a surprising closure size; not part of the save path.
+pub fn explain_closure(
+    document: &CadDocument,
+    graph: &DependencyGraph,
+) -> Vec<(Handle, Option<(Handle, EdgeKind)>)> {
+    let mut dirty: HashSet<Handle> = document.dirty_handles.iter().copied().collect();
+    let mut cause: HashMap<Handle, (Handle, EdgeKind)> = HashMap::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (referrer, targets) in &graph.edges {
+            if dirty.contains(referrer) {
+                continue;
+            }
+            for (target, kind) in targets {
+                if *kind != EdgeKind::Ownership && dirty.contains(target) {
+                    dirty.insert(*referrer);
+                    cause.insert(*referrer, (*target, *kind));
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    let mut out: Vec<(Handle, Option<(Handle, EdgeKind)>)> = dirty
+        .iter()
+        .map(|h| (*h, cause.get(h).copied()))
+        .collect();
+    out.sort_by_key(|(h, _)| h.value());
+    out
 }
 
 /// Build the complete per-handle writer plan.
