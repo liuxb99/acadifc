@@ -1,6 +1,16 @@
 pub(crate) fn worker_count() -> usize {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        // ACAD_DWG_WORKERS=1 forces the single-thread path so a save can be
+        // proven byte-identical with and without parallel workers (Phase 9
+        // P0-3). Any other value is ignored.
+        if let Some(raw) = std::env::var_os("ACAD_DWG_WORKERS") {
+            if let Some(count) = raw.to_str().and_then(|value| value.trim().parse::<usize>().ok()) {
+                if count >= 1 {
+                    return count;
+                }
+            }
+        }
         rayon::current_num_threads().max(1)
     }
     #[cfg(target_arch = "wasm32")]
