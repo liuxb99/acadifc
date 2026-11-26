@@ -437,7 +437,7 @@ impl<'a> DwgObjectWriter<'a> {
             let layer_h = self
             .pending_layer_handle
             .take()
-            .filter(|h| !h.is_null())
+            .filter(|h| self.document.layers.iter().any(|l| l.handle == *h))
             .or_else(|| self.document.layers.get(layer).map(|l| l.handle))
             .unwrap_or(Handle::NULL);
             self.writer
@@ -524,7 +524,7 @@ impl<'a> DwgObjectWriter<'a> {
         let layer_h = self
             .pending_layer_handle
             .take()
-            .filter(|h| !h.is_null())
+            .filter(|h| self.document.layers.iter().any(|l| l.handle == *h))
             .or_else(|| self.document.layers.get(layer).map(|l| l.handle))
             .unwrap_or(Handle::NULL);
         self.writer
