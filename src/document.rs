@@ -1205,6 +1205,11 @@ pub struct CadDocument {
     /// Enable raw passthrough for eligible, untouched records.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub raw_passthrough_enabled: bool,
+    /// Handles the edit contract explicitly deleted. Used to separate a real
+    /// deletion from a source record the semantic model never represented
+    /// (e.g. a duplicate-named table entry), which must be preserved.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub deleted_handles: std::collections::HashSet<Handle>,
     /// Handles whose semantic value changed and must be re-encoded.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub dirty_handles: std::collections::HashSet<Handle>,
@@ -1417,6 +1422,7 @@ impl CadDocument {
             passthrough_report: PassthroughReport::default(),
             read_audit: None,
             source_handles: std::collections::HashSet::new(),
+            deleted_handles: std::collections::HashSet::new(),
             dirty_handles: std::collections::HashSet::new(),
             preview: None,
             acis_sab_handles: Vec::new(),

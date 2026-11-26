@@ -51,6 +51,11 @@ pub struct HandleIndex {
     pub new: HashSet<Handle>,
     /// Source handles that lost their raw bytes (should be empty after P0-1).
     pub missing_raw: Vec<Handle>,
+    /// Source records the semantic model does not represent (for example a
+    /// second LAYER with a duplicate name, which `Table<T>` cannot hold). They
+    /// were never deleted by an edit contract, so they must be written back
+    /// verbatim instead of being dropped.
+    pub raw_only: HashSet<Handle>,
 }
 
 impl HandleIndex {
@@ -60,10 +65,19 @@ impl HandleIndex {
         let source = &document.source_handles;
         let mut deleted: Vec<Handle> = Vec::new();
         let mut missing_raw: Vec<Handle> = Vec::new();
+        let mut raw_only: HashSet<Handle> = HashSet::new();
         if !source.is_empty() {
             for h in source {
                 if !known.contains(h) {
-                    deleted.push(*h);
+                    if document.deleted_handles.contains(h) {
+                        deleted.push(*h);
+                    } else if raw.contains(h) {
+                        // Present in the file but not in the semantic model:
+                        // preserve the record verbatim.
+                        raw_only.insert(*h);
+                    } else {
+                        deleted.push(*h);
+                    }
                 } else if !raw.contains(h) {
                     missing_raw.push(*h);
                 }
@@ -82,6 +96,7 @@ impl HandleIndex {
             deleted: deleted.into_iter().collect(),
             new,
             missing_raw,
+            raw_only,
         }
     }
 }
@@ -774,10 +789,14 @@ pub fn plan(document: &CadDocument) -> std::result::Result<WriterPlan, String> {
         .unwrap_or(false);
 
     let mut all: Vec<Handle> = index.known.iter().copied().collect();
+    all.extend(index.raw_only.iter().copied());
     all.sort_by_key(|h| h.value());
     for handle in all {
         let has_raw = index.raw.contains(&handle);
-        let action = if index.new.contains(&handle) {
+        let action = if index.raw_only.contains(&handle) {
+            // Not modelled, but present in the source and never deleted.
+            RecordAction::Replay
+        } else if index.new.contains(&handle) {
             RecordAction::New
         } else if has_raw {
             if !same_version {

@@ -392,6 +392,9 @@ impl<'a> DwgObjectWriter<'a> {
         self.write_vport_entries();
         self.write_appid_entries();
         self.write_dimstyle_entries();
+        // Preserved records the semantic model cannot hold (duplicate-named
+        // table entries and other unmodelled objects) are written verbatim.
+        self.write_raw_only_records();
         if self.version.r13_15_only() {
             self.write_vx_entries();
         }
@@ -491,6 +494,21 @@ impl<'a> DwgObjectWriter<'a> {
         type_code: i16,
         entry_handles: &[Handle],
     ) {
+        // A source file may contain table entries the semantic table cannot
+        // model (duplicate names). Their records are replayed verbatim, so the
+        // control must list them too — otherwise they would be orphaned.
+        let mut owned: Vec<Handle> = entry_handles.to_vec();
+        let raw_only = self.raw_only_for_control(type_code);
+        owned.extend(raw_only);
+        self.write_table_control_inner(table_handle, type_code, &owned);
+    }
+
+    fn write_table_control_inner(
+        &mut self,
+        table_handle: Handle,
+        type_code: i16,
+        entry_handles: &[Handle],
+    ) {
         // Owner is always 0 for table controls (owned by header)
         self.write_common_non_entity_data(
             type_code,
@@ -538,6 +556,12 @@ impl<'a> DwgObjectWriter<'a> {
             } else {
                 regular.push(br.handle);
             }
+        }
+
+        // Preserved block headers the model cannot hold are listed too, so
+        // their replayed records stay owned instead of becoming orphans.
+        for handle in self.raw_only_of_type(common::OBJ_BLOCK_HEADER) {
+            regular.push(handle);
         }
 
         // Count excludes model/paper space
@@ -717,6 +741,62 @@ impl<'a> DwgObjectWriter<'a> {
             entry.previous_entry.value(),
         );
         self.register_object(entry.handle);
+    }
+
+    /// Raw-only records belonging to the table controlled by `control_type`.
+    fn raw_only_for_control(&self, control_type: i16) -> Vec<Handle> {
+        let entry_type = match control_type {
+            common::OBJ_LAYER_CONTROL => common::OBJ_LAYER,
+            common::OBJ_STYLE_CONTROL => common::OBJ_STYLE,
+            common::OBJ_LTYPE_CONTROL => common::OBJ_LTYPE,
+            common::OBJ_VIEW_CONTROL => common::OBJ_VIEW,
+            common::OBJ_UCS_CONTROL => common::OBJ_UCS,
+            common::OBJ_VPORT_CONTROL => common::OBJ_VPORT,
+            common::OBJ_APPID_CONTROL => common::OBJ_APPID,
+            common::OBJ_DIMSTYLE_CONTROL => common::OBJ_DIMSTYLE,
+            common::OBJ_BLOCK_CONTROL => common::OBJ_BLOCK_HEADER,
+            _ => return Vec::new(),
+        };
+        self.raw_only_of_type(entry_type)
+    }
+
+    /// Handles of preserved-but-unmodelled records of one object type. They are
+    /// written verbatim and listed by their table control so nothing the source
+    /// file contained is dropped.
+    fn raw_only_of_type(&self, type_code: i16) -> Vec<Handle> {
+        let mut handles: Vec<Handle> = self
+            .document
+            .raw_object_records
+            .iter()
+            .filter(|(handle, record)| {
+                record.type_code == type_code
+                    && self.plan.index.raw_only.contains(handle)
+                    && !self.registered_handles.contains(&handle.value())
+            })
+            .map(|(handle, _)| *handle)
+            .collect();
+        handles.sort_by_key(|h| h.value());
+        handles
+    }
+
+    /// Emit every preserved-but-unmodelled record exactly once.
+    fn write_raw_only_records(&mut self) {
+        let mut handles: Vec<Handle> = self.plan.index.raw_only.iter().copied().collect();
+        handles.sort_by_key(|h| h.value());
+        for handle in handles {
+            if self.registered_handles.contains(&handle.value()) {
+                continue;
+            }
+            if self.try_replay_raw(handle) {
+                continue;
+            }
+            // Fall through: the record is kept in the document's own raw cache
+            // only. Report it instead of dropping it silently.
+            self.omitted_objects.push(format!(
+                "{:#X}: preserved source record has no replayable bytes",
+                handle.value()
+            ));
+        }
     }
 
     fn write_layer_entries(&mut self) {
