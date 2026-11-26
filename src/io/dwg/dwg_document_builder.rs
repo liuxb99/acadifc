@@ -872,13 +872,13 @@ impl DwgDocumentBuilder {
                             use crate::tables::linetype::{
                                 LineTypeComplexContent, LineTypeComplexData, LineTypeElement,
                             };
-                            let is_complex = s.dwg_flags != 0
-                                || s.offset_x.abs() > 1e-12
-                                || s.offset_y.abs() > 1e-12
-                                || (s.scale - 1.0).abs() > 1e-12
-                                || s.rotation.abs() > 1e-12
-                                || s.shape_number != 0
-                                || sh != 0;
+                            // AutoCAD only treats a segment as complex when a
+                            // shape/text flag, a real shape number or a shape
+                            // file handle is present. Float noise in offsets or
+                            // scale must not create a complex element with
+                            // shape number 0 — that produces "shape 0 undefined"
+                            // warnings in AutoCAD for every simple dash.
+                            let is_complex = (s.dwg_flags & 0x02) != 0 || s.shape_number != 0;
                             let complex = if is_complex {
                                 let content = if s.dwg_flags & 0x02 != 0 {
                                     LineTypeComplexContent::Text {

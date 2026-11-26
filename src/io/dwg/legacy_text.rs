@@ -27,7 +27,7 @@ pub(crate) fn decode_legacy_text(encoding: &'static Encoding, bytes: &[u8]) -> S
     let (decoded, _, had_errors) = encoding.decode(bytes);
     let decoded = decoded.replace('\0', "");
     if !had_errors {
-        return decoded;
+        return decode_unicode_escapes(&decoded);
     }
 
     // Re-scan with a *strict* decoder so we know exactly which bytes were
@@ -58,6 +58,49 @@ pub(crate) fn decode_legacy_text(encoding: &'static Encoding, bytes: &[u8]) -> S
             }
         }
     }
+    decode_unicode_escapes(&out)
+}
+
+/// Decode AutoCAD's pre-R2007 Unicode escape `\U+XXXX` into real characters.
+/// Older CAD writers store CJK layer/style names this way when the code page
+/// cannot carry them; keeping the literal escape makes AutoCAD display the
+/// escape text instead of the Chinese name.
+fn decode_unicode_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\'
+            && matches!(chars.peek(), Some('U') | Some('u'))
+        {
+            chars.next();
+            if chars.peek() == Some(&'+') {
+                chars.next();
+                let mut hex = String::with_capacity(6);
+                while let Some(&next) = chars.peek() {
+                    if next.is_ascii_hexdigit() && hex.len() < 6 {
+                        hex.push(next);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if hex.len() >= 4 {
+                    if let Ok(value) = u32::from_str_radix(&hex, 16) {
+                        if let Some(decoded) = char::from_u32(value) {
+                            out.push(decoded);
+                            continue;
+                        }
+                    }
+                }
+                out.push_str("\\U+");
+                out.push_str(&hex);
+                continue;
+            }
+            out.push_str("\\U");
+            continue;
+        }
+        out.push(ch);
+    }
     out
 }
 
@@ -77,6 +120,27 @@ pub(crate) fn encode_legacy_text(encoding: &'static Encoding, text: &str) -> Vec
                     chars.next();
                     continue;
                 }
+            }
+        }
+        if !ch.is_ascii() {
+            let (_, _, unencodable) = encoding.encode(&ch.to_string());
+            if unencodable {
+                if let Some(original) = reverse_bytes(encoding, ch) {
+                    out.extend_from_slice(&encode_plain(encoding, &plain));
+                    plain.clear();
+                    out.extend_from_slice(&original);
+                    continue;
+                }
+                out.extend_from_slice(&encode_plain(encoding, &plain));
+                plain.clear();
+                let value = ch as u32;
+                let escape = if value <= 0xFFFF {
+                    format!("\\U+{value:04X}")
+                } else {
+                    format!("\\U+{value:06X}")
+                };
+                out.extend_from_slice(escape.as_bytes());
+                continue;
             }
         }
         plain.push(ch);
@@ -226,5 +290,29 @@ mod tests {
         let text = decode_legacy_text(encoding_rs::BIG5, &bytes);
         assert_eq!(text.chars().count(), 1);
         assert_eq!(encode_legacy_text(encoding_rs::BIG5, &text), bytes);
+    }
+}
+
+#[cfg(test)]
+mod unicode_escape_tests {
+    use super::*;
+
+    #[test]
+    fn big5_unicode_escape_round_trips_to_bytes() {
+        let bytes = b"\\U+4E2D\\U+5FC3\\U+7DDA";
+        let text = decode_legacy_text(encoding_rs::BIG5, bytes);
+        assert_eq!(text, "中心線");
+        // Writer stores CJK in the document code page; AutoCAD renders it.
+        let (expected, _, _) = encoding_rs::BIG5.encode("中心線");
+        assert_eq!(encode_legacy_text(encoding_rs::BIG5, &text), expected.as_ref());
+    }
+
+    #[test]
+    fn big5_native_cjk_still_uses_big5_bytes() {
+        let (native, _, _) = encoding_rs::BIG5.encode("中心線");
+        let text = decode_legacy_text(encoding_rs::BIG5, &native);
+        assert_eq!(text, "中心線");
+        let encoded = encode_legacy_text(encoding_rs::BIG5, &text);
+        assert_eq!(encoded, native.as_ref());
     }
 }

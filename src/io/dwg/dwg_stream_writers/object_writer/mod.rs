@@ -863,7 +863,9 @@ impl<'a> DwgObjectWriter<'a> {
         let mut shape_flags = Vec::with_capacity(ltype.elements.len());
 
         for seg in &ltype.elements {
-            let c = seg.complex.as_ref();
+            let c = seg.complex.as_ref().filter(|cx| {
+                cx.is_text() || cx.shape_number().unwrap_or(0) != 0 || !cx.style_handle.is_null()
+            });
             let flags = if let Some(ref cx) = c {
                 let mut f: i16 = 0;
                 if cx.is_absolute_rotation() { f |= 0x01; }
@@ -904,7 +906,9 @@ impl<'a> DwgObjectWriter<'a> {
             .zip(shape_numbers)
             .zip(shape_flags)
         {
-            let c = seg.complex.as_ref();
+            let c = seg.complex.as_ref().filter(|cx| {
+                cx.is_text() || cx.shape_number().unwrap_or(0) != 0 || !cx.style_handle.is_null()
+            });
             self.writer.write_bit_double(seg.length);
             self.writer.write_bit_short(shape_number);
             self.writer.write_raw_double(c.map_or(0.0, |cx| cx.offset[0]));
