@@ -2436,13 +2436,18 @@ impl<'a> DwgObjectWriter<'a> {
             self.visited_objects.insert(Handle::from(handle_val));
         }
 
-        let remaining: Vec<(Handle, crate::objects::ObjectType)> = self
+        // Determinism: the object table is a HashMap, so its iteration order is
+        // randomised per process. Writing "remaining" objects in that order made
+        // the same edit produce different bytes on every run. Always emit in
+        // ascending handle order so a save is reproducible.
+        let mut remaining: Vec<(Handle, crate::objects::ObjectType)> = self
             .document
             .objects
             .iter()
             .filter(|(h, _)| !self.visited_objects.contains(h))
             .map(|(h, o)| (*h, o.clone()))
             .collect();
+        remaining.sort_by_key(|(handle, _)| handle.value());
 
         for (handle, obj) in remaining {
             self.visited_objects.insert(handle);
