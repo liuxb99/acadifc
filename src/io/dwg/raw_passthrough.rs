@@ -775,13 +775,15 @@ pub fn plan(document: &CadDocument) -> std::result::Result<WriterPlan, String> {
             None
         }
     };
-    let dirty = match (&graph, dirty_closure_with_index(document, graph.as_ref().unwrap(), &index)) {
-        (Some(g), Ok(d)) => Some(d),
-        (Some(_), Err(e)) => {
-            out.blocked.push(e);
-            None
-        }
-        (None, _) => None,
+    let dirty = match graph.as_ref() {
+        Some(graph) => match dirty_closure_with_index(document, graph, &index) {
+            Ok(dirty) => Some(dirty),
+            Err(error) => {
+                out.blocked.push(error);
+                None
+            }
+        },
+        None => None,
     };
     let same_version = document
         .dwg_source_version
