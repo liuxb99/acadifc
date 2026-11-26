@@ -2031,9 +2031,20 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_hatch_boundary_path(&mut self, path: &BoundaryPath) {
-        self.writer.write_bit_long(path.flags.bits() as i32);
+        // A path made of a single closed PolylineEdge must be encoded as a
+        // polyline path (bit 2). Deriving the encoding from the flag alone let
+        // a PolylineEdge fall into the generic edge branch, which emitted a
+        // single LINE edge and desynchronised the rest of the record (pattern
+        // scale and seed points read back as garbage).
+        let single_polyline = matches!(path.edges.first(), Some(BoundaryEdge::Polyline(_)));
+        let flags = if single_polyline && path.edges.len() == 1 {
+            path.flags.bits() | 2
+        } else {
+            path.flags.bits()
+        };
+        self.writer.write_bit_long(flags as i32);
 
-        let is_polyline = (path.flags.bits() & 2) != 0;
+        let is_polyline = (flags & 2) != 0;
 
         if !is_polyline {
             // Edges
