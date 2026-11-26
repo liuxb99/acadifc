@@ -127,6 +127,8 @@ pub struct DwgObjectWriter<'a> {
     /// changed STYLE name that cannot be resolved to a table entry). A no-op
     /// save must not silently turn such a reference into NULL.
     pub(super) fidelity_errors: Vec<String>,
+    /// Expanded dirty set for same-version raw passthrough.
+    pub(super) passthrough_dirty: std::collections::HashSet<Handle>,
 }
 
 struct ParallelEntityBatch {
@@ -135,6 +137,7 @@ struct ParallelEntityBatch {
     object_queue: VecDeque<Handle>,
     registered_handles: HashSet<u64>,
     fidelity_errors: Vec<String>,
+    passthrough_dirty: std::collections::HashSet<Handle>,
 }
 
 impl<'a> DwgObjectWriter<'a> {
@@ -147,7 +150,8 @@ impl<'a> DwgObjectWriter<'a> {
     ) -> Option<&crate::document::RawObjectRecord> {
         if !self.document.raw_passthrough_enabled
             || self.dxf_version != crate::types::DxfVersion::AC1018
-            || self.document.dirty_handles.contains(&handle)
+            || self.document.raw_object_records.is_empty()
+            || self.passthrough_dirty.contains(&handle)
         {
             return None;
         }
@@ -260,6 +264,7 @@ impl<'a> DwgObjectWriter<'a> {
             owner_overrides: std::collections::HashMap::new(),
             linetype_handles: std::collections::HashMap::new(),
             fidelity_errors: Vec::new(),
+            passthrough_dirty: std::collections::HashSet::new(),
         })
     }
 
@@ -272,6 +277,21 @@ impl<'a> DwgObjectWriter<'a> {
     /// collected into `sab_entries` for writing into the `AcDb:AcDsPrototype_1b`
     /// section.
     pub fn write(mut self) -> (Vec<u8>, Vec<(u64, u32)>, Option<BoundingBox3D>, Vec<(Handle, Vec<u8>)>, Vec<String>) {
+        // Compute the exact set of records that must be re-encoded. Any
+        // unprovable dependency is a hard error: never silently fall back to
+        // a full rewrite while claiming passthrough fidelity.
+        if self.document.raw_passthrough_enabled
+            && self.dxf_version == crate::types::DxfVersion::AC1018
+            && !self.document.raw_object_records.is_empty()
+        {
+            match crate::io::dwg::raw_passthrough::build_dependencies(self.document)
+                .and_then(|deps| crate::io::dwg::raw_passthrough::dirty_closure(self.document, &deps))
+            {
+                Ok(dirty) => self.passthrough_dirty = dirty,
+                Err(e) => self.fidelity_errors.push(format!("raw passthrough blocked: {e}")),
+            }
+        }
+
         // Compute model space extents for VPort view adjustment
         self.model_space_extents = self.compute_model_space_extents();
 
@@ -1932,6 +1952,7 @@ impl<'a> DwgObjectWriter<'a> {
             owner_overrides: std::collections::HashMap::new(),
             linetype_handles: std::collections::HashMap::new(),
             fidelity_errors: Vec::new(),
+            passthrough_dirty: std::collections::HashSet::new(),
         };
         for handle in handles {
             if let Some(&idx) = worker.document.entity_index.get(handle) {
@@ -1944,6 +1965,7 @@ impl<'a> DwgObjectWriter<'a> {
             object_queue: worker.object_queue,
             registered_handles: worker.registered_handles,
             fidelity_errors: worker.fidelity_errors,
+            passthrough_dirty: worker.passthrough_dirty,
         }
     }
 
@@ -1966,6 +1988,7 @@ impl<'a> DwgObjectWriter<'a> {
         self.object_queue.extend(batch.object_queue);
         self.registered_handles.extend(batch.registered_handles);
         self.fidelity_errors.extend(batch.fidelity_errors);
+        self.passthrough_dirty.extend(batch.passthrough_dirty);
     }
 
     /// Expand entity_handles to include sub-entity handles (vertices, faces,

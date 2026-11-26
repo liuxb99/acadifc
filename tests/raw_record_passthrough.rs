@@ -38,6 +38,10 @@ fn ac1018_text_update_preserves_untouched_raw_records() {
 
     let entity_handles: std::collections::HashSet<Handle> = before
         .entities()
+        .filter(|entity| !matches!(entity,
+            EntityType::Polyline2D(_) | EntityType::Polyline3D(_)
+            | EntityType::PolyfaceMesh(_) | EntityType::PolygonMesh(_)))
+        .filter(|entity| !matches!(entity, EntityType::Insert(i) if i.has_attributes()))
         .map(|entity| entity.common().handle)
         .collect();
     let mut compared = 0usize;

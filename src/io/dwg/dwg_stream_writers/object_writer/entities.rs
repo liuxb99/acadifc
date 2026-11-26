@@ -21,11 +21,20 @@ impl<'a> DwgObjectWriter<'a> {
     /// Write a single entity record.
     pub(super) fn write_entity(&mut self, entity: &EntityType) {
         let handle = entity.common().handle;
+        // A verbatim parent record is only safe when all of its child records
+        // are also replayed. Child-owning entities are re-encoded through the
+        // semantic writer so VERTEX/SEQEND/ATTRIB records are emitted.
+        let owns_children = matches!(entity,
+            EntityType::Polyline2D(_) | EntityType::Polyline3D(_)
+            | EntityType::PolyfaceMesh(_) | EntityType::PolygonMesh(_)
+        ) || matches!(entity, EntityType::Insert(i) if i.has_attributes());
+        if !owns_children {
         if let Some(record) = self.preserved_raw_record(handle) {
             let bytes = record.bytes.clone();
             let bits = record.handle_bits;
             self.register_raw_object(handle, &bytes, bits);
             return;
+            }
         }
         match entity {
             EntityType::Point(e) => self.write_point(e),

@@ -55,6 +55,7 @@ pub mod file_headers;
 mod parallel;
 pub mod preview;
 pub mod reed_solomon;
+pub mod raw_passthrough;
 
 pub use dwg_reader::DwgReader;
 pub use dwg_reader::DwgReadOptions;

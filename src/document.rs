@@ -986,6 +986,17 @@ pub struct SummaryInfo {
     pub custom_properties: Vec<(String, String)>,
 }
 
+/// Decision report for same-version raw passthrough.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PassthroughReport {
+    pub enabled: bool,
+    pub eligible: usize,
+    pub replayed: usize,
+    pub rewritten: usize,
+    pub dirty_closure: Vec<Handle>,
+    pub blocked_reason: Option<String>,
+}
+
 /// Original merged-stream record preserved for same-version raw passthrough.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -1149,6 +1160,9 @@ pub struct CadDocument {
     /// Handles whose semantic value changed and must be re-encoded.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub dirty_handles: std::collections::HashSet<Handle>,
+    /// Filled by the DWG writer when raw passthrough is attempted.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub passthrough_report: PassthroughReport,
 
     /// Embedded preview/thumbnail image. Populated by the DWG reader from the
     /// file's preview section; the DWG writer embeds it when `Some` and emits an
@@ -1344,6 +1358,7 @@ impl CadDocument {
             dwg_source_version: None,
             raw_object_records: HashMap::new(),
             raw_passthrough_enabled: true,
+            passthrough_report: PassthroughReport::default(),
             dirty_handles: std::collections::HashSet::new(),
             preview: None,
             acis_sab_handles: Vec::new(),
