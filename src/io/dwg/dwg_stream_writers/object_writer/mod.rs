@@ -509,6 +509,12 @@ impl<'a> DwgObjectWriter<'a> {
         type_code: i16,
         entry_handles: &[Handle],
     ) {
+        // Phase 10: replay every untouched table control. The planner links
+        // control → entry structurally, so any membership change marks the
+        // control dirty and this returns false.
+        if self.try_replay_raw(table_handle) {
+            return;
+        }
         // Owner is always 0 for table controls (owned by header)
         self.write_common_non_entity_data(
             type_code,
@@ -534,6 +540,9 @@ impl<'a> DwgObjectWriter<'a> {
     /// from the count, writes them as hard-owner references at the end.
     fn write_block_control(&mut self) {
         let table_handle = self.document.block_records.handle();
+        if self.try_replay_raw(table_handle) {
+            return;
+        }
 
         self.write_common_non_entity_data(
             common::OBJ_BLOCK_CONTROL,
@@ -583,6 +592,12 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// STYLE_CONTROL
     fn write_text_style_control(&mut self) {
+        // Phase 10: an untouched control record replays byte for byte; a control
+        // only becomes dirty when its entry list changed (the planner links
+        // control → entry structurally).
+        if self.try_replay_raw(self.document.text_styles.handle()) {
+            return;
+        }
         let handles: Vec<Handle> = self
             .document
             .text_styles
@@ -598,6 +613,12 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// LTYPE_CONTROL — special: excludes ByLayer/ByBlock from count.
     fn write_ltype_control(&mut self) {
+        // Phase 10: an untouched control record replays byte for byte; a control
+        // only becomes dirty when its entry list changed (the planner links
+        // control → entry structurally).
+        if self.try_replay_raw(self.document.line_types.handle()) {
+            return;
+        }
         let table_handle = self.document.line_types.handle();
         self.write_common_non_entity_data(
             common::OBJ_LTYPE_CONTROL,
@@ -637,6 +658,12 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// DIMSTYLE_CONTROL — special: has an extra undocumented byte in R2000+.
     fn write_dimstyle_control(&mut self) {
+        // Phase 10: an untouched control record replays byte for byte; a control
+        // only becomes dirty when its entry list changed (the planner links
+        // control → entry structurally).
+        if self.try_replay_raw(self.document.dim_styles.handle()) {
+            return;
+        }
         let table_handle = self.document.dim_styles.handle();
         let handles: Vec<Handle> = self
             .document
@@ -672,6 +699,12 @@ impl<'a> DwgObjectWriter<'a> {
     /// Viewport entity header table control.
     /// The header section references this via hard-ownership handle.
     fn write_vpent_hdr_control(&mut self) {
+        // Phase 10: an untouched control record replays byte for byte; a control
+        // only becomes dirty when its entry list changed (the planner links
+        // control → entry structurally).
+        if self.try_replay_raw(self.document.vx_table.handle()) {
+            return;
+        }
         let table_handle = self.document.vx_table.handle();
         if table_handle.is_null() {
             return;
@@ -1313,9 +1346,13 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_vport(&mut self, vport: &crate::tables::VPort) {
-        // VPORTs stay semantic on purpose: write_vport_entries adjusts the
-        // active viewport's view center/height from the freshly computed model
-        // space extents. Replaying the source bytes would keep a stale view.
+        // An untouched VPORT replays byte for byte. When the model changed the
+        // viewport entry is prepared from freshly computed extents above and
+        // the planner marks it dirty, so this returns false and the semantic
+        // writer emits the updated view.
+        if self.try_replay_raw(vport.handle) {
+            return;
+        }
         self.write_common_non_entity_data(
             common::OBJ_VPORT,
             vport.handle,
@@ -1953,11 +1990,19 @@ impl<'a> DwgObjectWriter<'a> {
             // 40 claimed / 16 real entities). Keep only handles that resolve
             // to a live entity; the entity loop below uses the same list so
             // header and stream always agree.
+            // A block may own records the semantic model does not hold (an xref
+            // block with merged geometry kept only as preserved raw bytes).
+            // They are still written, so the header must keep listing them or
+            // the block silently loses its contents.
             let live_handles: Vec<Handle> = br
                 .entity_handles
                 .iter()
                 .copied()
-                .filter(|h| self.document.entity_index.contains_key(h))
+                .filter(|h| {
+                    self.document.entity_index.contains_key(h)
+                        || (self.document.raw_object_records.contains_key(h)
+                            && self.plan.is_replay(*h))
+                })
                 .collect();
             // An xref block with no local geometry still uses the empty list;
             // when the source DWG actually contains entities in the block
@@ -2233,6 +2278,14 @@ impl<'a> DwgObjectWriter<'a> {
         entity_handles: &[Handle],
         write_owned_count: bool,
     ) {
+        // Phase 10: replay the header verbatim when its block is untouched.
+        // Membership changes always mark the record dirty through the planner's
+        // structural (container → member) edges, so a replay here can only
+        // happen for a block whose member list is unchanged.
+        let _ = write_owned_count;
+        if self.try_replay_raw(record.handle) {
+            return;
+        }
 
         self.write_common_non_entity_data(
             common::OBJ_BLOCK_HEADER,
@@ -2369,6 +2422,11 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// Write BLOCK entity (block begin).
     fn write_block_begin(&mut self, record: &BlockRecord) {
+        // Phase 10: BLOCK/ENDBLK markers are ordinary records; replay them
+        // verbatim unless the planner had to touch this block.
+        if self.try_replay_raw(record.block_entity_handle) {
+            return;
+        }
         let block = if !record.block_entity_handle.is_null() {
             let result = self.document.entity_index.get(&record.block_entity_handle)
                 .and_then(|&idx| {
@@ -2440,6 +2498,9 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// Write ENDBLK entity (block end).
     fn write_block_end(&mut self, record: &BlockRecord) {
+        if self.try_replay_raw(record.block_end_handle) {
+            return;
+        }
         let block_end = if !record.block_end_handle.is_null() {
             self.document.entity_index.get(&record.block_end_handle)
                 .and_then(|&idx| {

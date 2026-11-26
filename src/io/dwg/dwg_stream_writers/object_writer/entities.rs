@@ -2495,6 +2495,20 @@ impl<'a> DwgObjectWriter<'a> {
     // â”€â”€ Polyline2D â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn write_polyline2d(&mut self, e: &Polyline2D) {
+        // Phase 10: replay the whole chain (parent + VERTEX + SEQEND) when none
+        // of its records changed, instead of re-encoding a structurally
+        // identical chain.
+        {
+            let mut chain: Vec<Handle> = Vec::with_capacity(e.vertices.len() + 2);
+            chain.push(e.common.handle);
+            chain.extend(e.vertices.iter().map(|v| v.handle));
+            if let Some(seq) = e.seqend_handle {
+                chain.push(seq);
+            }
+            if self.try_replay_chain(&chain) {
+                return;
+            }
+        }
         self.entity_preamble(common::OBJ_POLYLINE_2D, &e.common);
 
         self.writer.write_bit_short(e.flags.bits() as i16);

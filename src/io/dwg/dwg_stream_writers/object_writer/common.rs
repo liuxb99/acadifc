@@ -270,6 +270,33 @@ impl<'a> DwgObjectWriter<'a> {
         true
     }
 
+    /// Replay a compound entity chain (parent + VERTEX/ATTRIB children + SEQEND)
+    /// verbatim when every record in the chain is untouched. The records are
+    /// emitted in the given order, which is the DWG source order.
+    pub(super) fn try_replay_chain(&mut self, chain: &[Handle]) -> bool {
+        if chain.is_empty() {
+            return false;
+        }
+        for handle in chain {
+            if !self.plan.is_replay(*handle) {
+                return false;
+            }
+            if !self
+                .document
+                .raw_object_records
+                .contains_key(handle)
+            {
+                return false;
+            }
+        }
+        for handle in chain {
+            if !self.try_replay_raw(*handle) {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn register_raw_object(&mut self, handle: Handle, raw_data: &[u8], handle_bits: i64) {
         // Duplicate-handle guard (see register_object).
         if !handle.is_null() && !self.registered_handles.insert(handle.value()) {

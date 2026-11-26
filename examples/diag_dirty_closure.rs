@@ -42,6 +42,22 @@ fn main() {
             }
         }
     }
+    if std::env::var_os("PLAN_DUMP").is_some() {
+        let plan = rp::plan(&doc).expect("plan");
+        for hex in ["C31F2", "F100BFC"] {
+            let h = Handle::new(u64::from_str_radix(hex, 16).unwrap());
+            println!("PLAN {:X} {:?}", h.value(), plan.action(h));
+        }
+        println!("BLOCKED {:?}", plan.blocked);
+        let f = Handle::new(0xF100BFC);
+        println!(
+            "IDX known={} raw={} raw_only={} deleted={} new={}",
+            index.known.contains(&f), index.raw.contains(&f), index.raw_only.contains(&f),
+            index.deleted.contains(&f), index.new.contains(&f)
+        );
+        println!("ENTITY {} OBJECTS {}", doc.get_entity(f).is_some(), doc.objects.contains_key(&f));
+        println!("SOURCE_HAS {} RAW_HAS {}", doc.source_handles.contains(&f), doc.raw_object_records.contains_key(&f));
+    }
     println!("SEED {:?}", doc.dirty_handles.iter().map(|h| h.value()).collect::<Vec<_>>());
     println!("DIRTY {}", dirty.len());
     let mut sorted: Vec<Handle> = dirty.iter().copied().collect();
