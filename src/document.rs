@@ -995,6 +995,12 @@ pub struct PassthroughReport {
     pub rewritten: usize,
     pub dirty_closure: Vec<Handle>,
     pub blocked_reason: Option<String>,
+    /// Objects created after reading (no source bytes by design).
+    pub new_objects: usize,
+    /// Source objects removed by the edit contract.
+    pub deleted: usize,
+    /// Records that could not be handled safely.
+    pub blocked_records: usize,
 }
 
 /// Original merged-stream record preserved for same-version raw passthrough.
@@ -1005,6 +1011,48 @@ pub struct RawObjectRecord {
     pub handle_bits: i64,
     pub version: DxfVersion,
     pub type_code: i16,
+}
+
+/// A handle listed in the AcDb:Handles section that the pass-2 record
+/// catalog could not even locate a record for (missing offset or unreadable
+/// type code). Reported instead of being silently dropped.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct UnreadableHandle {
+    pub handle: u64,
+    pub reason: String,
+}
+
+/// A record whose bytes could not be read/decoded.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RecordReadFailure {
+    pub handle: u64,
+    pub offset: i64,
+    pub raw_type_code: i16,
+    pub reason: String,
+}
+
+/// Read-time accounting for raw record capture. Makes the difference between
+/// "handle map entries", "records actually read" and "raw records preserved"
+/// auditable instead of silent.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ReaderAudit {
+    /// Entries in the source AcDb:Handles section.
+    pub handle_map_total: usize,
+    /// Records successfully located and read (all passes).
+    pub records_read: usize,
+    /// Records whose raw bytes were preserved for passthrough.
+    pub raw_records_preserved: usize,
+    /// Records that could not be read at all.
+    pub failures: Vec<RecordReadFailure>,
+    /// Handles that never produced a readable record because the offset or
+    /// type code was unavailable.
+    pub unreadable: Vec<UnreadableHandle>,
+    /// Handles present in the handle map with no entity, object or raw record
+    /// after decoding.
+    pub unresolved: Vec<u64>,
 }
 
 /// A CAD document containing all drawing data
@@ -1163,6 +1211,14 @@ pub struct CadDocument {
     /// Filled by the DWG writer when raw passthrough is attempted.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub passthrough_report: PassthroughReport,
+    /// Read-time raw capture accounting (set by the DWG reader).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub read_audit: Option<ReaderAudit>,
+    /// Every handle present in the source file's handle map. Used to
+    /// distinguish objects created after reading (legitimately without raw
+    /// bytes) from source objects whose bytes were lost.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub source_handles: std::collections::HashSet<Handle>,
 
     /// Embedded preview/thumbnail image. Populated by the DWG reader from the
     /// file's preview section; the DWG writer embeds it when `Some` and emits an
@@ -1359,6 +1415,8 @@ impl CadDocument {
             raw_object_records: HashMap::new(),
             raw_passthrough_enabled: true,
             passthrough_report: PassthroughReport::default(),
+            read_audit: None,
+            source_handles: std::collections::HashSet::new(),
             dirty_handles: std::collections::HashSet::new(),
             preview: None,
             acis_sab_handles: Vec::new(),

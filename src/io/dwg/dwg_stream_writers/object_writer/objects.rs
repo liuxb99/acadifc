@@ -274,10 +274,79 @@ fn matrix_to_row_major(m: &crate::types::Matrix4) -> [f64; 12] {
 }
 
 impl<'a> DwgObjectWriter<'a> {
+    /// Record an object that the stream deliberately omits, so the omission is
+    /// auditable and never silent.
+    fn record_omitted(&mut self, handle: Handle, kind: &str, reason: &str) {
+        self.omitted_objects
+            .push(format!("{:#X} ({kind}): {reason}", handle.value()));
+    }
+
+    /// Enqueue the objects a semantic write of `obj` would queue, so a replayed
+    /// record keeps the object stream graph identical (and nothing reachable
+    /// becomes unreachable just because its parent was replayed).
+    fn enqueue_object_references(&mut self, obj: &ObjectType) {
+        match obj {
+            ObjectType::Dictionary(d) => {
+                for (_, h) in &d.entries {
+                    if !h.is_null() {
+                        self.object_queue.push_back(*h);
+                    }
+                }
+            }
+            ObjectType::DictionaryWithDefault(d) => {
+                for (_, h) in &d.entries {
+                    if !h.is_null() {
+                        self.object_queue.push_back(*h);
+                    }
+                }
+                if !d.default_handle.is_null() {
+                    self.object_queue.push_back(d.default_handle);
+                }
+            }
+            ObjectType::Layout(l) => {
+                for vp in &l.viewports {
+                    if !vp.is_null() {
+                        self.object_queue.push_back(*vp);
+                    }
+                }
+            }
+            ObjectType::Group(g) => {
+                for e in &g.entities {
+                    if !e.is_null() {
+                        self.object_queue.push_back(*e);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     // ── Object dispatch ─────────────────────────────────────────────
 
     /// Write a single non-graphical object record.
+    ///
+    /// Phase 9 P0-4: this is the single dispatch point for every non-graphical
+    /// object. Replay, rewrite and omission are decided by the shared writer
+    /// plan so the object stream and the Dictionary references that point at it
+    /// can never disagree.
     pub(super) fn write_object(&mut self, obj: &ObjectType) {
+        let handle = object_handle(obj);
+        if !handle.is_null() {
+            // Gate the stream on the same predicate used to keep Dictionary
+            // entries: an object that is filtered out of its dictionary must
+            // not be written, and an object that is written must stay
+            // referenced.
+            if !self.is_writable_object(&handle) {
+                self.record_omitted(handle, object_kind_name(obj), "not writable");
+                return;
+            }
+            if self.try_replay_raw(handle) {
+                // Keep the reference queue identical to a semantic write so the
+                // objects reachable from this record are still emitted once.
+                self.enqueue_object_references(obj);
+                return;
+            }
+        }
         match obj {
             ObjectType::Dictionary(d) => self.write_dictionary(d),
             ObjectType::Layout(l) => self.write_layout(l),
@@ -1230,6 +1299,11 @@ impl<'a> DwgObjectWriter<'a> {
     /// objects must be excluded from dictionary records so the DWG doesn't contain
     /// dangling handle references.
     pub(super) fn is_writable_object(&self, handle: &Handle) -> bool {
+        // A record the plan will replay is always writable: its bytes are
+        // emitted verbatim, so no semantic writer capability is required.
+        if self.plan.is_replay(*handle) {
+            return true;
+        }
         match self.document.objects.get(handle) {
             None => false,
             Some(obj) => match obj {
@@ -1251,11 +1325,15 @@ impl<'a> DwgObjectWriter<'a> {
                     self.document.classes.get_by_name("TABLESTYLE").is_some()
                 }
                 ObjectType::Unknown { type_name, raw_dwg_data, raw_dwg_version, .. } => {
-                    // Exclude types that would also be excluded if parsed into proper variants
-                    if type_name.starts_with("DWG_OBJ_106") // TABLESTYLE
-                        || type_name.starts_with("DWG_OBJ_105") // TABLECONTENT
-                    {
-                        return false;
+                    let _ = type_name;
+                    // P0-5: the predicate must answer exactly "will the writer
+                    // emit this object?". Unknown TABLESTYLE/TABLECONTENT used
+                    // to be reported unwritable while write_object still emitted
+                    // their raw bytes, so the object survived but its Dictionary
+                    // entry was silently dropped. A replayable raw record is now
+                    // authoritative for both sides.
+                    if self.plan.is_replay(*handle) {
+                        return true;
                     }
                     // Exclude raw objects dropped on incompatible cross-version save.
                     raw_dwg_data.is_some() && self.raw_passthrough_compatible(*raw_dwg_version)
@@ -2746,5 +2824,92 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_short(wv.display_frame);
 
         self.register_object(wv.handle);
+    }
+}
+
+/// Handle of any non-graphical object.
+fn object_handle(obj: &ObjectType) -> Handle {
+    match obj {
+        ObjectType::Dictionary(o) => o.handle,
+        ObjectType::Layout(o) => o.handle,
+        ObjectType::XRecord(o) => o.handle,
+        ObjectType::Group(o) => o.handle,
+        ObjectType::MLineStyle(o) => o.handle,
+        ObjectType::ImageDefinition(o) => o.handle,
+        ObjectType::UnderlayDefinition(o) => o.handle,
+        ObjectType::PlotSettings(o) => o.handle,
+        ObjectType::MultiLeaderStyle(o) => o.handle,
+        ObjectType::TableStyle(o) => o.handle,
+        ObjectType::TableContent(o) => o.common.handle,
+        ObjectType::Scale(o) => o.handle,
+        ObjectType::ObjectContextData(o) => o.handle,
+        ObjectType::SortEntitiesTable(o) => o.handle,
+        ObjectType::DictionaryVariable(o) => o.handle,
+        ObjectType::VisualStyle(o) => o.handle,
+        ObjectType::Material(o) => o.handle,
+        ObjectType::ImageDefinitionReactor(o) => o.handle,
+        ObjectType::GeoData(o) => o.handle,
+        ObjectType::SpatialFilter(o) => o.handle,
+        ObjectType::RasterVariables(o) => o.handle,
+        ObjectType::BookColor(o) => o.handle,
+        ObjectType::PlaceHolder(o) => o.handle,
+        ObjectType::DictionaryWithDefault(o) => o.handle,
+        ObjectType::WipeoutVariables(o) => o.handle,
+        ObjectType::BlockVisibilityParameter(o) => o.handle,
+        ObjectType::DynamicBlock(o) => o.handle,
+        ObjectType::Associative(o) => o.handle,
+        ObjectType::ClassObject(o) => o.handle,
+        ObjectType::DataObject(o) => o.handle,
+        ObjectType::Field(o) => o.handle,
+        ObjectType::FieldList(o) => o.handle,
+        ObjectType::RegisteredClass(o) => o.handle,
+        ObjectType::DgnLineStyle(o) => o.handle,
+        ObjectType::ProxyObject(o) => o.handle,
+        ObjectType::Unknown { handle, .. } => *handle,
+    }
+}
+
+fn object_kind_name(obj: &ObjectType) -> &'static str {
+    match obj {
+        ObjectType::Dictionary(_) => "DICTIONARY",
+        ObjectType::Layout(_) => "LAYOUT",
+        ObjectType::XRecord(_) => "XRECORD",
+        ObjectType::Group(_) => "GROUP",
+        ObjectType::MLineStyle(_) => "MLINESTYLE",
+        ObjectType::ImageDefinition(_) => "IMAGEDEF",
+        ObjectType::UnderlayDefinition(_) => "UNDERLAYDEFINITION",
+        ObjectType::PlotSettings(_) => "PLOTSETTINGS",
+        ObjectType::MultiLeaderStyle(_) => "MLEADERSTYLE",
+        ObjectType::TableStyle(_) => "TABLESTYLE",
+        ObjectType::TableContent(_) => "TABLECONTENT",
+        ObjectType::Scale(_) => "SCALE",
+        ObjectType::ObjectContextData(_) => "OBJECTCONTEXTDATA",
+        ObjectType::SortEntitiesTable(_) => "SORTENTSTABLE",
+        ObjectType::DictionaryVariable(_) => "DICTIONARYVAR",
+        ObjectType::VisualStyle(_) => "VISUALSTYLE",
+        ObjectType::Material(_) => "MATERIAL",
+        ObjectType::ImageDefinitionReactor(_) => "IMAGEDEF_REACTOR",
+        ObjectType::GeoData(_) => "GEODATA",
+        ObjectType::SpatialFilter(_) => "SPATIAL_FILTER",
+        ObjectType::RasterVariables(_) => "RASTERVARIABLES",
+        ObjectType::BookColor(_) => "DBCOLOR",
+        ObjectType::PlaceHolder(_) => "ACDBPLACEHOLDER",
+        ObjectType::DictionaryWithDefault(_) => "ACDBDICTIONARYWDFLT",
+        ObjectType::WipeoutVariables(_) => "WIPEOUTVARIABLES",
+        ObjectType::BlockVisibilityParameter(_) => "BLOCKVISIBILITYPARAMETER",
+        ObjectType::DynamicBlock(_) => "DYNAMICBLOCK",
+        ObjectType::Associative(_) => "ASSOCIATIVE",
+        ObjectType::ClassObject(_) => "CLASSOBJECT",
+        ObjectType::DataObject(_) => "DATAOBJECT",
+        ObjectType::Field(_) => "FIELD",
+        ObjectType::FieldList(_) => "FIELDLIST",
+        ObjectType::RegisteredClass(_) => "REGISTEREDCLASS",
+        ObjectType::DgnLineStyle(_) => "DGNLINESTYLE",
+        ObjectType::ProxyObject(_) => "PROXYOBJECT",
+        ObjectType::Unknown { type_name, .. } => {
+            // Static-ish: caller formats the name separately when needed.
+            let _ = type_name;
+            "UNKNOWN"
+        }
     }
 }

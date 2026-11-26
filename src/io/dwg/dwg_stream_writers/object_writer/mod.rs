@@ -127,8 +127,16 @@ pub struct DwgObjectWriter<'a> {
     /// changed STYLE name that cannot be resolved to a table entry). A no-op
     /// save must not silently turn such a reference into NULL.
     pub(super) fidelity_errors: Vec<String>,
-    /// Expanded dirty set for same-version raw passthrough.
-    pub(super) passthrough_dirty: std::collections::HashSet<Handle>,
+    /// Immutable writer plan (per-handle replay/rewrite decision) for the whole
+    /// save. Shared by every parallel worker so none of them can replay bytes
+    /// the planner decided to rewrite.
+    pub(super) plan: std::sync::Arc<crate::io::dwg::raw_passthrough::WriterPlan>,
+    /// Objects deliberately omitted from the stream, with the reason.
+    pub(super) omitted_objects: Vec<String>,
+    /// Records emitted by replaying preserved source bytes.
+    pub(super) replayed_records: usize,
+    /// Records re-serialised from the semantic model.
+    pub(super) rewritten_records: usize,
     /// Layer handle captured from EntityCommon by entity_preamble.
     pub(super) pending_layer_handle: Option<Handle>,
 }
@@ -139,7 +147,6 @@ struct ParallelEntityBatch {
     object_queue: VecDeque<Handle>,
     registered_handles: HashSet<u64>,
     fidelity_errors: Vec<String>,
-    passthrough_dirty: std::collections::HashSet<Handle>,
 }
 
 impl<'a> DwgObjectWriter<'a> {
@@ -150,11 +157,10 @@ impl<'a> DwgObjectWriter<'a> {
         &self,
         handle: Handle,
     ) -> Option<&crate::document::RawObjectRecord> {
-        if !self.document.raw_passthrough_enabled
-            || self.dxf_version != crate::types::DxfVersion::AC1018
-            || self.document.raw_object_records.is_empty()
-            || self.passthrough_dirty.contains(&handle)
-        {
+        if self.dxf_version != crate::types::DxfVersion::AC1018 {
+            return None;
+        }
+        if !self.plan.is_replay(handle) {
             return None;
         }
         self.document
@@ -266,7 +272,12 @@ impl<'a> DwgObjectWriter<'a> {
             owner_overrides: std::collections::HashMap::new(),
             linetype_handles: std::collections::HashMap::new(),
             fidelity_errors: Vec::new(),
-            passthrough_dirty: std::collections::HashSet::new(),
+            plan: std::sync::Arc::new(
+                crate::io::dwg::raw_passthrough::WriterPlan::default(),
+            ),
+            omitted_objects: Vec::new(),
+            replayed_records: 0,
+            rewritten_records: 0,
             pending_layer_handle: None,
         })
     }
@@ -279,19 +290,40 @@ impl<'a> DwgObjectWriter<'a> {
     /// `acis_empty=true` in the entity stream; their SAB binary data is
     /// collected into `sab_entries` for writing into the `AcDb:AcDsPrototype_1b`
     /// section.
-    pub fn write(mut self) -> (Vec<u8>, Vec<(u64, u32)>, Option<BoundingBox3D>, Vec<(Handle, Vec<u8>)>, Vec<String>) {
+    pub fn write(
+        mut self,
+    ) -> (
+        Vec<u8>,
+        Vec<(u64, u32)>,
+        Option<BoundingBox3D>,
+        Vec<(Handle, Vec<u8>)>,
+        Vec<String>,
+        crate::io::dwg::raw_passthrough::WriterReport,
+    ) {
         // Compute the exact set of records that must be re-encoded. Any
         // unprovable dependency is a hard error: never silently fall back to
         // a full rewrite while claiming passthrough fidelity.
-        if self.document.raw_passthrough_enabled
-            && self.dxf_version == crate::types::DxfVersion::AC1018
+        // Build ONE immutable writer plan for the whole save. Every parallel
+        // worker inherits it, so a modified entity can never replay the bytes
+        // it replaced.
+        if self.dxf_version == crate::types::DxfVersion::AC1018
             && !self.document.raw_object_records.is_empty()
         {
-            match crate::io::dwg::raw_passthrough::build_dependencies(self.document)
-                .and_then(|deps| crate::io::dwg::raw_passthrough::dirty_closure(self.document, &deps))
-            {
-                Ok(dirty) => self.passthrough_dirty = dirty,
-                Err(e) => self.fidelity_errors.push(format!("raw passthrough blocked: {e}")),
+            match crate::io::dwg::raw_passthrough::plan(self.document) {
+                Ok(plan) => {
+                    if !plan.blocked.is_empty() {
+                        self.fidelity_errors
+                            .push(format!("raw passthrough blocked: {}", plan.blocked.join("; ")));
+                    }
+                    self.plan = std::sync::Arc::new(plan);
+                }
+                Err(e) => {
+                    self.fidelity_errors
+                        .push(format!("raw passthrough blocked: {e}"));
+                    self.plan = std::sync::Arc::new(
+                        crate::io::dwg::raw_passthrough::WriterPlan::default(),
+                    );
+                }
             }
         }
 
@@ -370,7 +402,33 @@ impl<'a> DwgObjectWriter<'a> {
         // ── Drain object queue ──────────────────────────────────
         self.write_objects();
 
-        (self.output, self.handle_map, self.model_space_extents, self.sab_entries, self.fidelity_errors)
+        let (plan_replay, plan_rewrite, plan_new, plan_delete, _plan_blocked) = self.plan.counts();
+        let _ = (plan_replay, plan_rewrite, plan_new, plan_delete);
+        let mut rewrite_reasons: Vec<(u64, String)> = Vec::new();
+        for (handle, action) in &self.plan.actions {
+            if let crate::io::dwg::raw_passthrough::RecordAction::Rewrite(reason) = action {
+                rewrite_reasons.push((*handle, reason.describe()));
+            }
+        }
+        let report = crate::io::dwg::raw_passthrough::WriterReport {
+            replayed: self.replayed_records,
+            rewritten: self.rewritten_records,
+            new_objects: plan_new,
+            deleted: plan_delete,
+            blocked: self.plan.blocked.clone(),
+            omitted: self.omitted_objects.clone(),
+            errors: self.fidelity_errors.clone(),
+            rewrite_reasons,
+        };
+        crate::io::dwg::raw_passthrough::publish_writer_report(report.clone());
+        (
+            self.output,
+            self.handle_map,
+            self.model_space_extents,
+            self.sab_entries,
+            self.fidelity_errors,
+            report,
+        )
     }
 
     /// Whether this version stores ACIS data externally (AcDsPrototype_1b section)
@@ -669,6 +727,10 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_layer(&mut self, layer: &crate::tables::Layer) {
+        // Phase 9 P0-4: untouched symbol-table entries replay verbatim.
+        if self.try_replay_raw(layer.handle) {
+            return;
+        }
         self.write_common_non_entity_data(
             common::OBJ_LAYER,
             layer.handle,
@@ -768,6 +830,10 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_text_style(&mut self, style: &crate::tables::TextStyle) {
+        // Phase 9 P0-4: untouched symbol-table entries replay verbatim.
+        if self.try_replay_raw(style.handle) {
+            return;
+        }
         let anno = self.annotative_eed_block(style.annotative);
         self.write_common_non_entity_data_eed(
             common::OBJ_STYLE,
@@ -825,6 +891,10 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_line_type(&mut self, ltype: &crate::tables::LineType) {
+        // Phase 9 P0-4: untouched symbol-table entries replay verbatim.
+        if self.try_replay_raw(ltype.handle) {
+            return;
+        }
         self.write_common_non_entity_data(
             common::OBJ_LTYPE,
             ltype.handle,
@@ -951,6 +1021,10 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_view(&mut self, view: &crate::tables::View) {
+        // Phase 9 P0-4: untouched symbol-table entries replay verbatim.
+        if self.try_replay_raw(view.handle) {
+            return;
+        }
         self.write_common_non_entity_data(
             common::OBJ_VIEW,
             view.handle,
@@ -1047,6 +1121,10 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_ucs(&mut self, ucs: &crate::tables::Ucs) {
+        // Phase 9 P0-4: untouched symbol-table entries replay verbatim.
+        if self.try_replay_raw(ucs.handle) {
+            return;
+        }
         self.write_common_non_entity_data(
             common::OBJ_UCS,
             ucs.handle,
@@ -1155,6 +1233,9 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_vport(&mut self, vport: &crate::tables::VPort) {
+        // VPORTs stay semantic on purpose: write_vport_entries adjusts the
+        // active viewport's view center/height from the freshly computed model
+        // space extents. Replaying the source bytes would keep a stale view.
         self.write_common_non_entity_data(
             common::OBJ_VPORT,
             vport.handle,
@@ -1346,6 +1427,10 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_appid(&mut self, app: &crate::tables::AppId) {
+        // Phase 9 P0-4: untouched symbol-table entries replay verbatim.
+        if self.try_replay_raw(app.handle) {
+            return;
+        }
         self.write_common_non_entity_data(
             common::OBJ_APPID,
             app.handle,
@@ -1384,6 +1469,10 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_dimstyle(&mut self, ds: &crate::tables::DimStyle) {
+        // Phase 9 P0-4: untouched symbol-table entries replay verbatim.
+        if self.try_replay_raw(ds.handle) {
+            return;
+        }
         let dimclrd_color = ds
             .dimclrd_true_color
             .unwrap_or_else(|| crate::types::Color::from_index(ds.dimclrd));
@@ -1963,7 +2052,10 @@ impl<'a> DwgObjectWriter<'a> {
             owner_overrides: std::collections::HashMap::new(),
             linetype_handles: std::collections::HashMap::new(),
             fidelity_errors: Vec::new(),
-            passthrough_dirty: std::collections::HashSet::new(),
+            plan: std::sync::Arc::clone(&self.plan),
+            omitted_objects: Vec::new(),
+            replayed_records: 0,
+            rewritten_records: 0,
             pending_layer_handle: None,
         };
         for handle in handles {
@@ -1977,7 +2069,6 @@ impl<'a> DwgObjectWriter<'a> {
             object_queue: worker.object_queue,
             registered_handles: worker.registered_handles,
             fidelity_errors: worker.fidelity_errors,
-            passthrough_dirty: worker.passthrough_dirty,
         }
     }
 
@@ -2000,7 +2091,6 @@ impl<'a> DwgObjectWriter<'a> {
         self.object_queue.extend(batch.object_queue);
         self.registered_handles.extend(batch.registered_handles);
         self.fidelity_errors.extend(batch.fidelity_errors);
-        self.passthrough_dirty.extend(batch.passthrough_dirty);
     }
 
     /// Expand entity_handles to include sub-entity handles (vertices, faces,
@@ -2400,7 +2490,7 @@ mod tests {
     fn object_writer_writes_basic_document() {
         let doc = CadDocument::new();
         let writer = DwgObjectWriter::new(&doc).unwrap();
-        let (output, handle_map, _, _, _) = writer.write();
+        let (output, handle_map, _, _, _, _) = writer.write();
         // Should have produced some output (at least the 0x0DCA marker)
         assert!(!output.is_empty());
         // Should have recorded some handles (table controls + entries)
@@ -2411,7 +2501,7 @@ mod tests {
     fn object_writer_encodes_dca_marker() {
         let doc = CadDocument::new();
         let writer = DwgObjectWriter::new(&doc).unwrap();
-        let (output, _, _, _, _) = writer.write();
+        let (output, _, _, _, _, _) = writer.write();
         // First 4 bytes should be 0x0DCA as little-endian i32
         if output.len() >= 4 {
             let marker = i32::from_le_bytes([output[0], output[1], output[2], output[3]]);

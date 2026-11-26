@@ -161,7 +161,10 @@ pub use tables::{
 
 // Re-export document
 pub use document::CadDocument;
-pub use document::{Preview, PreviewFormat};
+pub use document::{
+    Preview, PreviewFormat, RawObjectRecord, ReaderAudit, RecordReadFailure, UnreadableHandle,
+};
+pub use io::dwg::raw_passthrough::{take_writer_report, WriterReport};
 
 // Re-export I/O types
 pub use io::dxf::{DxfReader, DxfReaderConfiguration, DxfWriter};

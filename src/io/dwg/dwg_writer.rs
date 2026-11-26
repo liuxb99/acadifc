@@ -456,7 +456,8 @@ fn write_ac15<W: Write + Seek>(
     // ── Phase 1: Compute objects FIRST to get handle map ──
     let objects_started = web_time::Instant::now();
     let obj_writer = DwgObjectWriter::new(document)?;
-    let (obj_data, handle_map_u32, extents, _sab_entries, fidelity_errors) = obj_writer.write();
+    let (obj_data, handle_map_u32, extents, _sab_entries, fidelity_errors, _writer_report) =
+        obj_writer.write();
     reject_fidelity_errors(fidelity_errors)?;
     if std::env::var_os("PERF").is_some() {
         eprintln!(
@@ -563,7 +564,8 @@ fn write_ac18<W: Write + Seek>(
     // ── Phase 1: Compute objects FIRST to get handle map ──
     let objects_started = web_time::Instant::now();
     let obj_writer = DwgObjectWriter::new(document)?;
-    let (obj_data, handle_map_u32, extents, sab_entries, fidelity_errors) = obj_writer.write();
+    let (obj_data, handle_map_u32, extents, sab_entries, fidelity_errors, _writer_report) =
+        obj_writer.write();
     reject_fidelity_errors(fidelity_errors)?;
     if std::env::var_os("PERF").is_some() {
         eprintln!(
@@ -699,7 +701,8 @@ fn write_ac21_impl<W: Write + Seek>(
     // ── Phase 1: Compute objects FIRST to get handle map ──
     let objects_started = web_time::Instant::now();
     let obj_writer = DwgObjectWriter::new(document)?;
-    let (obj_data, handle_map_u32, extents, sab_entries, fidelity_errors) = obj_writer.write();
+    let (obj_data, handle_map_u32, extents, sab_entries, fidelity_errors, _writer_report) =
+        obj_writer.write();
     reject_fidelity_errors(fidelity_errors)?;
     if std::env::var_os("PERF").is_some() {
         eprintln!(

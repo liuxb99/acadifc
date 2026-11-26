@@ -72,6 +72,10 @@ struct Pass2Output {
     section_view_reps: Vec<Handle>,
     section_view_style: Option<crate::entities::SectionViewStyle>,
     raw_records: HashMap<Handle, crate::document::RawObjectRecord>,
+    /// Records successfully read in this chunk (read auditing, P0-1).
+    records_read: usize,
+    /// Records that could not be read, with handle/offset/type/reason.
+    read_failures: Vec<crate::document::RecordReadFailure>,
 }
 
 impl Pass2Output {
@@ -102,6 +106,8 @@ impl Pass2Output {
             section_view_reps: Vec::new(),
             section_view_style: None,
             raw_records: HashMap::new(),
+            records_read: 0,
+            read_failures: Vec::new(),
         }
     }
 
@@ -401,20 +407,42 @@ impl DwgDocumentBuilder {
         }
         let mut parsed_entries: Vec<ParsedEntry> = Vec::new();
         let catalog_started = web_time::Instant::now();
-        let record_catalog: Vec<(u64, usize, i16, i16)> =
-            filter_map_slice(&handles, |&handle| {
-                let offset = self.obj_reader.offset_for(handle)?;
-                if offset < 0 {
-                    return None;
+        // P0-1: a handle whose offset or type code cannot be resolved must be
+        // reported, never silently dropped from the catalog. Enumerate every
+        // handle from the handle map and classify the reason for any gap.
+        let mut record_catalog: Vec<(u64, usize, i16, i16)> = Vec::with_capacity(handles.len());
+        let mut unreadable_handles: Vec<crate::document::UnreadableHandle> = Vec::new();
+        for &handle in &handles {
+            let offset = match self.obj_reader.offset_for(handle) {
+                Some(offset) if offset >= 0 => offset as usize,
+                Some(offset) => {
+                    unreadable_handles.push(crate::document::UnreadableHandle {
+                        handle,
+                        reason: format!("negative object offset {offset}"),
+                    });
+                    continue;
                 }
-                let raw = self.obj_reader.type_code_at(offset as usize).ok()?;
-                Some((
+                None => {
+                    unreadable_handles.push(crate::document::UnreadableHandle {
+                        handle,
+                        reason: "handle missing from object map".to_string(),
+                    });
+                    continue;
+                }
+            };
+            match self.obj_reader.type_code_at(offset) {
+                Ok(raw) => record_catalog.push((
                     handle,
-                    offset as usize,
+                    offset,
                     raw,
                     Self::resolve_type_code(raw, &class_map),
-                ))
-            });
+                )),
+                Err(e) => unreadable_handles.push(crate::document::UnreadableHandle {
+                    handle,
+                    reason: format!("type code unreadable at offset {offset}: {e}"),
+                }),
+            }
+        }
         self.report_progress(75);
         if perf {
             eprintln!(
@@ -426,11 +454,36 @@ impl DwgDocumentBuilder {
         self.report_progress(110);
         let pass1_started = web_time::Instant::now();
 
-        for &(handle, offset, _, type_code) in &record_catalog {
+        let mut pass1_records_read = 0usize;
+        let mut read_failures: Vec<crate::document::RecordReadFailure> = Vec::new();
+        let mut table_raw_records: HashMap<Handle, crate::document::RawObjectRecord> =
+            HashMap::new();
+        for &(handle, offset, raw_type_code, type_code) in &record_catalog {
             if is_table_type(type_code) {
                 let (_, mut reader) = match self.obj_reader.read_record_at(offset) {
-                    Ok(record) => record,
-                    Err(_) => continue,
+                    Ok(record) => {
+                        pass1_records_read += 1;
+                        record
+                    }
+                    Err(e) => {
+                        read_failures.push(crate::document::RecordReadFailure {
+                            handle,
+                            offset: offset as i64,
+                            raw_type_code,
+                            reason: format!("pass1 read_record_at failed: {e}"),
+                        });
+                        continue;
+                    }
+                };
+                // P0-4: capture the verbatim bytes of symbol-table records too.
+                // Without this every LAYER/STYLE/LTYPE/BLOCK_RECORD is rewritten
+                // from the semantic model on save, which cannot round-trip
+                // unknown tail data.
+                let table_raw_record = crate::document::RawObjectRecord {
+                    bytes: reader.raw_merged_data(),
+                    handle_bits: reader.get_handle_bits(),
+                    version: self.obj_reader.dxf_version(),
+                    type_code: raw_type_code,
                 };
                 // Wrap in catch_unwind to survive corrupt/misaligned records
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -458,6 +511,7 @@ impl DwgDocumentBuilder {
                             continue;
                         }
                     };
+                table_raw_records.insert(Handle::from(handle), table_raw_record);
                 // Table<T> starts with synthetic low control handles. Replace
                 // them with the actual control-object handles from this DWG
                 // before writing the document back. Otherwise a real record
@@ -1234,6 +1288,11 @@ impl DwgDocumentBuilder {
             );
         }
 
+        // P0-4: symbol-table raw records captured in pass 1 join the same raw
+        // cache the writer replays from, so untouched table entries can be
+        // emitted verbatim instead of being re-encoded from the model.
+        document.raw_object_records.extend(table_raw_records);
+
         // ── Pass 2: Read entities and non-table objects ────────────────
         let mut pending = PendingPolylines {
             vertices: HashMap::new(),
@@ -1298,6 +1357,7 @@ impl DwgDocumentBuilder {
 
         let pass2_total = pass2_records.len().max(1);
         let mut pass2_done = 0usize;
+        let mut records_read = 0usize;
         for batch in pass2_records.chunks(batch_size) {
             let decode_started = web_time::Instant::now();
             let chunks: Vec<Pass2Chunk> =
@@ -1310,8 +1370,21 @@ impl DwgDocumentBuilder {
                     );
                     for &(handle, offset, raw_type_code, type_code) in records {
                         let (_, reader) = match self.obj_reader.read_record_at(offset) {
-                            Ok(record) => record,
-                            Err(_) => continue,
+                            Ok(record) => {
+                                chunk.output.records_read += 1;
+                                record
+                            }
+                            Err(e) => {
+                                chunk.output.read_failures.push(
+                                    crate::document::RecordReadFailure {
+                                        handle,
+                                        offset: offset as i64,
+                                        raw_type_code,
+                                        reason: format!("pass2 read_record_at failed: {e}"),
+                                    },
+                                );
+                                continue;
+                            }
                         };
                         let result =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1374,8 +1447,13 @@ impl DwgDocumentBuilder {
                 }
                 if document.section_view_style.is_none() {
                     document.section_view_style = chunk.output.section_view_style.take();
-                document.raw_object_records.extend(chunk.output.raw_records.drain());
                 }
+                // P0-1: raw record capture must merge for EVERY chunk. It was
+                // previously nested inside the section_view_style condition, so
+                // once one chunk supplied a SectionViewStyle every later chunk
+                // silently lost its raw records (passthrough then had nothing
+                // to replay and rewrote everything).
+                document.raw_object_records.extend(chunk.output.raw_records.drain());
                 document.objects.extend(chunk.output.objects.drain());
                 document.add_loaded_entity_batch(&mut chunk.output.entities);
                 for (owner, mut vertices) in chunk.pending.vertices.drain() {
@@ -1396,6 +1474,8 @@ impl DwgDocumentBuilder {
                         .or_default()
                         .append(&mut attributes);
                 }
+                records_read += chunk.output.records_read;
+                read_failures.append(&mut chunk.output.read_failures);
                 for (handle, type_code) in chunk.failures {
                     skipped_pass2 += 1;
                     self.notifications.notify(
@@ -2569,6 +2649,34 @@ impl DwgDocumentBuilder {
         // it into the header so consumers (and DXF export) see the real scale
         // rather than the "1:1" default.
         Self::reflect_annotation_scale(document);
+
+        // ── P0-1: publish the read audit ──────────────────────────────
+        // Account for every handle in the source map: what was read, what raw
+        // bytes were preserved, and exactly which handles are missing and why.
+        {
+            let mut unresolved: Vec<u64> = Vec::new();
+            for &handle in &handles {
+                let h = Handle::from(handle);
+                let known = document.entity_index.contains_key(&h)
+                    || document.objects.contains_key(&h)
+                    || document.raw_object_records.contains_key(&h);
+                if !known {
+                    unresolved.push(handle);
+                }
+            }
+            let mut all_failures = read_failures;
+            all_failures.sort_by_key(|f| f.handle);
+            unresolved.sort_unstable();
+            document.source_handles = handles.iter().map(|&h| Handle::from(h)).collect();
+            document.read_audit = Some(crate::document::ReaderAudit {
+                handle_map_total: self.obj_reader.handle_map_len(),
+                records_read: pass1_records_read + records_read,
+                raw_records_preserved: document.raw_object_records.len(),
+                failures: all_failures,
+                unreadable: unreadable_handles,
+                unresolved,
+            });
+        }
 
         if perf {
             eprintln!(

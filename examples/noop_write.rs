@@ -8,5 +8,23 @@ fn main() {
     let mut reader = DwgReader::from_file(&input).expect("open");
     let doc = reader.read().expect("read");
     DwgWriter::write_to_file(&output, &doc).expect("write");
+    if let Some(report) = acadrust::take_writer_report() {
+        println!(
+            "writer replayed={} rewritten={} new={} deleted={} omitted={} errors={} blocked={}",
+            report.replayed,
+            report.rewritten,
+            report.new_objects,
+            report.deleted,
+            report.omitted.len(),
+            report.errors.len(),
+            report.blocked.len()
+        );
+        for o in report.omitted.iter().take(10) {
+            println!("OMITTED {o}");
+        }
+        for b in report.blocked.iter().take(10) {
+            println!("BLOCKED {b}");
+        }
+    }
     println!("wrote {output}");
 }

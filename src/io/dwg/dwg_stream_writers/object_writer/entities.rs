@@ -28,17 +28,8 @@ impl<'a> DwgObjectWriter<'a> {
             EntityType::Polyline2D(_) | EntityType::Polyline3D(_)
             | EntityType::PolyfaceMesh(_) | EntityType::PolygonMesh(_)
         ) || matches!(entity, EntityType::Insert(i) if i.has_attributes());
-        // Raw replay preserves relative handle references verbatim. Layer
-        // names decoded from \U+XXXX escapes can change the object-map layout
-        // when re-encoded, so prefer the semantic writer for those entities.
-        let raw_safe_layer = entity.common().layer.is_ascii();
-        if !owns_children && raw_safe_layer {
-        if let Some(record) = self.preserved_raw_record(handle) {
-            let bytes = record.bytes.clone();
-            let bits = record.handle_bits;
-            self.register_raw_object(handle, &bytes, bits);
+        if !owns_children && self.try_replay_raw(handle) {
             return;
-            }
         }
         match entity {
             EntityType::Point(e) => self.write_point(e),
@@ -5697,7 +5688,7 @@ mod tests {
         };
         let doc = make_doc_with_entity(EntityType::Point(pt));
         let writer = DwgObjectWriter::new(&doc).unwrap();
-        let (output, _map, _, _, _) = writer.write();
+        let (output, _map, _, _, _, _) = writer.write();
         assert!(!output.is_empty());
     }
 
@@ -5715,7 +5706,7 @@ mod tests {
         };
         let doc = make_doc_with_entity(EntityType::Line(line));
         let writer = DwgObjectWriter::new(&doc).unwrap();
-        let (output, _map, _, _, _) = writer.write();
+        let (output, _map, _, _, _, _) = writer.write();
         assert!(!output.is_empty());
     }
 }

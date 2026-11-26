@@ -219,6 +219,16 @@ impl DwgObjectReader {
     /// ```text
     /// [MS(size)][R2010+: MC(handle_bits)][merged_data][CRC16]
     /// ```
+    /// Number of entries in the source handle map (for read auditing).
+    pub fn handle_map_len(&self) -> usize {
+        self.handle_map.len()
+    }
+
+    /// Handles listed by the source handle map, with their byte offsets.
+    pub fn handle_entries(&self) -> impl Iterator<Item = (u64, i64)> + '_ {
+        self.handle_map.iter().map(|(&handle, &offset)| (handle, offset))
+    }
+
     pub fn read_record_at(&self, offset: usize) -> Result<(i16, DwgMergedReader)> {
         if offset >= self.data.len() {
             return Err(DxfError::Parse(format!(

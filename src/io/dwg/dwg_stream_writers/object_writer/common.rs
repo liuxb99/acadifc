@@ -163,6 +163,11 @@ impl<'a> DwgObjectWriter<'a> {
     /// final output is flushed).  This is critical because the CRC-16
     /// operates on complete bytes.
     pub fn register_object(&mut self, handle: Handle) {
+        self.rewritten_records += 1;
+        self.register_object_inner(handle)
+    }
+
+    fn register_object_inner(&mut self, handle: Handle) {
         // Duplicate-handle guard: a handle must appear in the object map exactly
         // once. If this one was already emitted (e.g. an xdictionary XRECORD
         // reached from two paths), drop this repeat — duplicate handles are a
@@ -244,6 +249,27 @@ impl<'a> DwgObjectWriter<'a> {
     /// bytes from the source file.  The raw data is the exact payload
     /// that was between `[ModularShort(size)]` and `[CRC16]` in the
     /// original file.  We re-frame it with a fresh MS prefix and CRC.
+    /// Emit the preserved source record for `handle` verbatim when the writer
+    /// plan decided to replay it. Returns true when the record was written, in
+    /// which case the caller must not emit a semantic encoding as well.
+    ///
+    /// This is the single replay entry point for entities, symbol-table entries
+    /// and non-graphical objects (Phase 9 P0-4): every record class goes through
+    /// the same per-handle decision instead of ad-hoc early returns.
+    pub(super) fn try_replay_raw(&mut self, handle: Handle) -> bool {
+        let Some(record) = self.preserved_raw_record(handle) else {
+            return false;
+        };
+        if record.version != self.dxf_version {
+            return false;
+        }
+        let bytes = record.bytes.clone();
+        let handle_bits = record.handle_bits;
+        self.register_raw_object(handle, &bytes, handle_bits);
+        self.replayed_records += 1;
+        true
+    }
+
     pub fn register_raw_object(&mut self, handle: Handle, raw_data: &[u8], handle_bits: i64) {
         // Duplicate-handle guard (see register_object).
         if !handle.is_null() && !self.registered_handles.insert(handle.value()) {
