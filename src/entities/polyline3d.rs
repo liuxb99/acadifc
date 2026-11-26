@@ -175,6 +175,14 @@ pub struct Polyline3D {
     pub normal: Vector3,
     /// Vertex list
     pub vertices: Vec<Vertex3DPolyline>,
+    /// Handle of the SEQEND that terminates this entity's child chain.
+    ///
+    /// Preserved from the source drawing: the writer must re-emit the same
+    /// handle, otherwise every chain reference in the block record changes and
+    /// a no-op save stops being byte-identical (and the source SEQEND record
+    /// would be written twice).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub seqend_handle: Option<crate::types::Handle>,
 }
 
 impl Polyline3D {
@@ -193,6 +201,7 @@ impl Polyline3D {
             elevation: 0.0,
             normal: Vector3::UNIT_Z,
             vertices: Vec::new(),
+            seqend_handle: None,
         }
     }
 

@@ -954,8 +954,10 @@ impl<'a> DwgObjectWriter<'a> {
         // Entry name
         self.writer.write_variable_text(&style.name);
 
-        // Xref-dependant
-        self.write_xref_dependant_bit();
+        // Xref-dependant: an xref-dependent style keeps its flag (and the
+        // external reference block pointer); writing a hardcoded "false"
+        // silently converted such a style into a local one on every save.
+        self.write_xref_dependant_bit_value(style.xref_dependent);
 
         // Shape file flag
         self.writer.write_bit(style.is_shape_file);
@@ -977,10 +979,18 @@ impl<'a> DwgObjectWriter<'a> {
         // Big font name
         self.writer.write_variable_text(&style.big_font_file);
 
-        // External reference block handle (hard pointer)
-        // Null for non-xref-dependent styles
+        // External reference block handle (hard pointer). Only xref-dependent
+        // styles reference a block; everything else is null.
+        let xref_block = if style.xref_dependent {
+            style
+                .xref_block_handle
+                .map(|handle| handle.value())
+                .unwrap_or(0)
+        } else {
+            0
+        };
         self.writer
-            .write_handle(DwgReferenceType::HardPointer, 0);
+            .write_handle(DwgReferenceType::HardPointer, xref_block);
 
         self.register_object(style.handle);
     }

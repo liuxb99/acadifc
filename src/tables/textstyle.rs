@@ -55,6 +55,11 @@ pub struct TextStyle {
     pub true_type_font: String,
     /// Whether this style is xref-dependent
     pub xref_dependent: bool,
+    /// Block record this style is xref-dependent on, captured from the source
+    /// DWG. Without it a rewritten style cannot prove its dependency and the
+    /// reader downgrades it to a local style on the next open.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub xref_block_handle: Option<Handle>,
     /// Whether this STYLE record names an SHX shape file.
     pub is_shape_file: bool,
     /// Whether glyphs are drawn vertically.
@@ -80,6 +85,7 @@ impl TextStyle {
             big_font_file: String::new(),
             true_type_font: String::new(),
             xref_dependent: false,
+            xref_block_handle: None,
             is_shape_file: false,
             is_vertical: false,
             annotative: false,
@@ -100,6 +106,7 @@ impl TextStyle {
             big_font_file: String::new(),
             true_type_font: String::new(),
             xref_dependent: false,
+            xref_block_handle: None,
             is_shape_file: false,
             is_vertical: false,
             annotative: false,

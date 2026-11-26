@@ -903,6 +903,8 @@ impl DwgDocumentBuilder {
                     style.flags.upside_down = (data.generation & 4) != 0;
                     // Only mark xref-dependent if the xref block record handle is valid
                     style.xref_dependent = data.xref_dependent && data.xref_handle != 0;
+                    style.xref_block_handle = (data.xref_handle != 0)
+                        .then(|| Handle::from(data.xref_handle));
                     // Use add_allow_duplicate for shape-file-only styles (empty name)
                     // so multiple empty-named styles are preserved. Named styles use
                     // add_or_replace to avoid duplicates (e.g. "Standard").
@@ -1553,6 +1555,11 @@ impl DwgDocumentBuilder {
                         }
                     }
                     EntityType::Polyline3D(ref mut e) => {
+                        // Preserve the source SEQEND: the writer re-emits the
+                        // chain and must reuse this exact handle.
+                        if let Some(sh) = pending.seqends.get(&poly_handle).copied() {
+                            e.seqend_handle = Some(sh);
+                        }
                         e.vertices = verts
                             .into_iter()
                             .filter_map(|v| {
@@ -1604,6 +1611,9 @@ impl DwgDocumentBuilder {
                         }
                     }
                     EntityType::PolygonMesh(ref mut e) => {
+                        if let Some(sh) = pending.seqends.get(&poly_handle).copied() {
+                            e.seqend_handle = Some(sh);
+                        }
                         e.vertices = verts
                             .into_iter()
                             .filter_map(|v| {
@@ -5856,6 +5866,33 @@ impl DwgDocumentBuilder {
                                     &class_name_upper,
                                 )
                             else {
+                                // A class this reader cannot fully decode still
+                                // exists: keep the object with its original
+                                // handle, owner, class name, raw bytes, handle
+                                // bits and DWG version so it is replayed
+                                // verbatim and stays referenceable.
+                                // The semantic cursor stopped early, so take the
+                                // complete record bytes from the raw capture
+                                // instead of the partially consumed stream.
+                                let raw = document
+                                    .raw_records
+                                    .get(&Handle::from(handle))
+                                    .map(|record| (record.bytes.clone(), record.handle_bits));
+                                document.objects.insert(
+                                    Handle::from(handle),
+                                    crate::objects::ObjectType::Unknown {
+                                        type_name: dxf_name.to_string(),
+                                        handle: Handle::from(handle),
+                                        owner: owner_handle,
+                                        raw_dxf_codes: None,
+                                        raw_dwg_data: raw.as_ref().map(|(bytes, _)| bytes.clone()),
+                                        raw_dwg_handle_bits: raw
+                                            .as_ref()
+                                            .map(|(_, bits)| *bits)
+                                            .unwrap_or(0),
+                                        raw_dwg_version: Some(document.version),
+                                    },
+                                );
                                 return;
                             };
                             match &data {

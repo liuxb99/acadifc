@@ -18,7 +18,7 @@ use crate::entities::EntityType;
 use crate::objects::ObjectType;
 use crate::tables::TableEntry;
 use crate::types::Handle;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Kind of reference between two records. Structural edges propagate a rewrite
 /// to the container (a block header lists its members; a dictionary lists its
@@ -56,6 +56,11 @@ pub struct HandleIndex {
     /// were never deleted by an edit contract, so they must be written back
     /// verbatim instead of being dropped.
     pub raw_only: HashSet<Handle>,
+    /// Handles that the source file's handle map lists but which produced
+    /// neither a semantic object nor a preserved record. They were never
+    /// deleted by an edit contract: the write must be blocked, never silently
+    /// turned into a DELETE.
+    pub missing_source: BTreeSet<Handle>,
 }
 
 impl HandleIndex {
@@ -66,17 +71,22 @@ impl HandleIndex {
         let mut deleted: Vec<Handle> = Vec::new();
         let mut missing_raw: Vec<Handle> = Vec::new();
         let mut raw_only: HashSet<Handle> = HashSet::new();
+        let mut missing_source: BTreeSet<Handle> = BTreeSet::new();
         if !source.is_empty() {
             for h in source {
-                if !known.contains(h) {
-                    if document.deleted_handles.contains(h) {
-                        deleted.push(*h);
-                    } else if raw.contains(h) {
+                if document.deleted_handles.contains(h) {
+                    // The only way a source object becomes a DELETE.
+                    deleted.push(*h);
+                } else if !known.contains(h) {
+                    if raw.contains(h) {
                         // Present in the file but not in the semantic model:
                         // preserve the record verbatim.
                         raw_only.insert(*h);
                     } else {
-                        deleted.push(*h);
+                        // The source listed it, the reader produced nothing and
+                        // no bytes were preserved. This is a MISSING_SOURCE
+                        // condition, not a deletion: block instead of losing it.
+                        missing_source.insert(*h);
                     }
                 } else if !raw.contains(h) {
                     missing_raw.push(*h);
@@ -97,8 +107,109 @@ impl HandleIndex {
             new,
             missing_raw,
             raw_only,
+            missing_source,
         }
     }
+}
+
+/// The single classification of one handle that every stage must agree on.
+///
+/// Reader, dependency graph, writer plan, writer and verifier all derive the
+/// state from this enum instead of re-implementing "does this handle exist".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "SCREAMING_SNAKE_CASE"))]
+pub enum HandleState {
+    /// Decoded into the semantic model and (when read from a file) has bytes.
+    Known,
+    /// Present only as preserved source bytes; never semantically decoded.
+    RawOnly,
+    /// Created after reading.
+    New,
+    /// Removed by the edit contract.
+    ExplicitlyDeleted,
+    /// Listed by the source handle map but neither modelled nor preserved.
+    MissingSource,
+    /// Referenced by something in the document but present nowhere.
+    Unresolved,
+}
+
+impl HandleState {
+    /// Whether a reference to this handle can be honoured in the output.
+    pub fn is_resolvable(self) -> bool {
+        matches!(self, HandleState::Known | HandleState::RawOnly | HandleState::New)
+    }
+
+    pub fn is_present(self) -> bool {
+        matches!(
+            self,
+            HandleState::Known | HandleState::RawOnly | HandleState::New | HandleState::ExplicitlyDeleted
+        )
+    }
+}
+
+impl HandleIndex {
+    /// Classify one handle. This is the only place that decides a state.
+    pub fn state(&self, handle: Handle) -> HandleState {
+        if handle.is_null() {
+            return HandleState::Unresolved;
+        }
+        if self.deleted.contains(&handle) {
+            return HandleState::ExplicitlyDeleted;
+        }
+        if self.known.contains(&handle) {
+            // `new` is a subset of `known`: both are decoded objects, the plan
+            // decides whether they replay or are written from the model.
+            return HandleState::Known;
+        }
+        if self.raw_only.contains(&handle) || self.raw.contains(&handle) {
+            return HandleState::RawOnly;
+        }
+        if self.missing_source.contains(&handle) || self.missing_raw.iter().any(|h| *h == handle) {
+            return HandleState::MissingSource;
+        }
+        HandleState::Unresolved
+    }
+
+    /// True when a reference to `handle` is satisfiable after the write.
+    pub fn resolves(&self, handle: Handle) -> bool {
+        self.state(handle).is_resolvable()
+    }
+
+    /// True when the handle is listed by the source file at all.
+    pub fn is_source(&self, handle: Handle) -> bool {
+        !self.deleted.contains(&handle) && !self.new.contains(&handle)
+    }
+
+    /// Handles in this index whose state is not one of the safe ones.
+    pub fn problem_handles(&self) -> Vec<(Handle, HandleState)> {
+        let mut out: Vec<(Handle, HandleState)> = Vec::new();
+        for handle in self
+            .missing_source
+            .iter()
+            .copied()
+            .chain(self.missing_raw.iter().copied())
+        {
+            out.push((handle, self.state(handle)));
+        }
+        out.sort_by_key(|(handle, _)| handle.value());
+        out
+    }
+}
+
+/// One unsatisfiable reference found while building the dependency graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceIssue {
+    /// Record that holds the reference.
+    pub source: Handle,
+    /// What kind of record holds it (`BLOCK_RECORD`, `DICTIONARY`, `ENTITY`, …).
+    pub container: &'static str,
+    /// The handle that cannot be resolved.
+    pub target: Handle,
+    /// Classification of the target.
+    pub target_state: HandleState,
+    /// Human-readable description.
+    pub detail: String,
 }
 
 /// Every handle the semantic model owns, including table entries and controls.
@@ -131,15 +242,24 @@ pub fn collect_known_handles(document: &CadDocument) -> HashSet<Handle> {
                 for v in &p.vertices {
                     known.insert(v.handle);
                 }
+                if let Some(seq) = p.seqend_handle {
+                    known.insert(seq);
+                }
             }
             EntityType::PolyfaceMesh(p) => {
                 for v in &p.vertices {
                     known.insert(v.common.handle);
                 }
+                if let Some(seq) = p.seqend_handle {
+                    known.insert(seq);
+                }
             }
             EntityType::PolygonMesh(p) => {
                 for v in &p.vertices {
                     known.insert(v.common.handle);
+                }
+                if let Some(seq) = p.seqend_handle {
+                    known.insert(seq);
                 }
             }
             _ => {}
@@ -153,6 +273,10 @@ pub fn collect_known_handles(document: &CadDocument) -> HashSet<Handle> {
     }
     for s in document.text_styles.iter() {
         known.insert(s.handle);
+        // An xref-dependent style references its external block record.
+        if let Some(block) = s.xref_block_handle {
+            known.insert(block);
+        }
     }
     for l in document.line_types.iter() {
         known.insert(l.handle);
@@ -250,12 +374,62 @@ pub fn build_dependencies(
     build_dependencies_with_index(document, &index)
 }
 
+/// Every unsatisfiable reference in the document, classified. Empty means the
+/// reference graph is closed.
+pub fn reference_issues(document: &CadDocument) -> Vec<ReferenceIssue> {
+    let index = HandleIndex::build(document);
+    build_graph(document, &index).1
+}
+
 pub fn build_dependencies_with_index(
     document: &CadDocument,
     index: &HandleIndex,
 ) -> std::result::Result<DependencyGraph, String> {
+    let (graph, issues) = build_graph(document, index);
+    if issues.is_empty() {
+        return Ok(graph);
+    }
+    let mut shown: Vec<String> = issues.iter().map(ReferenceIssue::describe).collect();
+    shown.sort();
+    shown.truncate(20);
+    Err(format!(
+        "{} unresolvable reference(s): {}",
+        issues.len(),
+        shown.join("; ")
+    ))
+}
+
+impl ReferenceIssue {
+    pub fn describe(&self) -> String {
+        format!(
+            "{} {:#X}: {} -> {:#X} ({:?})",
+            self.container,
+            self.source.value(),
+            self.detail,
+            self.target.value(),
+            self.target_state
+        )
+    }
+}
+
+fn build_graph(
+    document: &CadDocument,
+    index: &HandleIndex,
+) -> (DependencyGraph, Vec<ReferenceIssue>) {
     let mut graph = DependencyGraph::default();
-    let mut unresolved: Vec<String> = Vec::new();
+    let mut issues: Vec<ReferenceIssue> = Vec::new();
+    let mut note = |container: &'static str, source: Handle, target: Handle, detail: String| {
+        if index.resolves(target) {
+            return;
+        }
+        issues.push(ReferenceIssue {
+            source,
+            container,
+            target,
+            target_state: index.state(target),
+            detail,
+        });
+    };
 
     // ── Entities ────────────────────────────────────────────────────
     for entity in document.entities() {
@@ -414,14 +588,12 @@ pub fn build_dependencies_with_index(
     for br in document.block_records.iter() {
         for &member in &br.entity_handles {
             graph.structural(br.handle, member, index);
-            if !index.known.contains(&member) && !index.deleted.contains(&member) {
-                unresolved.push(format!(
-                    "BLOCK_RECORD {:#X} ({}) lists unknown member {:#X}",
-                    br.handle.value(),
-                    br.name,
-                    member.value()
-                ));
-            }
+            note(
+                "BLOCK_RECORD",
+                br.handle,
+                member,
+                format!("block '{}' lists member", br.name),
+            );
         }
         for field in [br.block_entity_handle, br.block_end_handle] {
             if !field.is_null() {
@@ -442,15 +614,14 @@ pub fn build_dependencies_with_index(
         graph.ownership(h, object_owner(obj), index);
         match obj {
             ObjectType::Dictionary(dict) => {
-                for (_, target) in &dict.entries {
+                for (name, target) in &dict.entries {
                     graph.structural(h, *target, index);
-                    if !index.known.contains(target) && !index.deleted.contains(target) {
-                        unresolved.push(format!(
-                            "DICTIONARY {:#X} entry references unknown handle {:#X}",
-                            h.value(),
-                            target.value()
-                        ));
-                    }
+                    note(
+                        "DICTIONARY",
+                        h,
+                        *target,
+                        format!("entry '{name}' references"),
+                    );
                 }
                 for r in &dict.reactors {
                     graph.pointer(h, *r, index);
@@ -460,15 +631,14 @@ pub fn build_dependencies_with_index(
                 }
             }
             ObjectType::DictionaryWithDefault(d) => {
-                for (_, target) in &d.entries {
+                for (name, target) in &d.entries {
                     graph.structural(h, *target, index);
-                    if !index.known.contains(target) && !index.deleted.contains(target) {
-                        unresolved.push(format!(
-                            "DICTIONARY_WITH_DEFAULT {:#X} entry references unknown handle {:#X}",
-                            h.value(),
-                            target.value()
-                        ));
-                    }
+                    note(
+                        "DICTIONARY_WITH_DEFAULT",
+                        h,
+                        *target,
+                        format!("entry '{name}' references"),
+                    );
                 }
 
             }
@@ -512,17 +682,7 @@ pub fn build_dependencies_with_index(
         }
     }
 
-    if !unresolved.is_empty() {
-        let mut shown = unresolved.clone();
-        shown.sort();
-        shown.truncate(20);
-        return Err(format!(
-            "{} unresolvable reference(s): {}",
-            unresolved.len(),
-            shown.join("; ")
-        ));
-    }
-    Ok(graph)
+    (graph, issues)
 }
 
 fn object_owner(obj: &ObjectType) -> Handle {
@@ -633,6 +793,15 @@ pub struct WriterPlan {
 }
 
 impl WriterPlan {
+    /// Count the plan's actions per kind, for auditing plan/writer agreement.
+    pub fn action_counts(&self) -> BTreeMap<&'static str, usize> {
+        let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+        for action in self.actions.values() {
+            *counts.entry(action.label()).or_default() += 1;
+        }
+        counts
+    }
+
     pub fn action(&self, handle: Handle) -> Option<&RecordAction> {
         self.actions.get(&handle.value())
     }
@@ -793,11 +962,24 @@ pub fn plan(document: &CadDocument) -> std::result::Result<WriterPlan, String> {
         },
         None => None,
     };
-    let same_version = document
-        .dwg_source_version
-        .map(|v| v == document.version)
-        .unwrap_or(false);
+    // Verbatim replay is only implemented for the AC1018 object stream. A
+    // document read from another version is written from the semantic model;
+    // the plan must say so, otherwise it promises replays the writer cannot
+    // perform and the two stages disagree about the same handle.
+    let raw_passthrough_supported = document.version == crate::types::DxfVersion::AC1018;
+    let same_version = raw_passthrough_supported
+        && document
+            .dwg_source_version
+            .map(|v| v == document.version)
+            .unwrap_or(false);
 
+    // A source handle the reader could neither decode nor preserve is not a
+    // deletion: the save must be blocked with a reproducible reason.
+    for handle in index.problem_handles() {
+        if out.blocked.len() < 64 {
+            out.blocked.push(handle.0.value().to_string());
+        }
+    }
     let mut all: Vec<Handle> = index.known.iter().copied().collect();
     all.extend(index.raw_only.iter().copied());
     all.sort_by_key(|h| h.value());
@@ -834,6 +1016,15 @@ pub fn plan(document: &CadDocument) -> std::result::Result<WriterPlan, String> {
             out.blocked.push(reason.clone());
         }
         out.actions.insert(handle.value(), action);
+    }
+    for (handle, state) in index.problem_handles() {
+        out.actions.insert(
+            handle.value(),
+            RecordAction::Blocked(format!(
+                "source handle {:#X} is {state:?}: neither decoded nor preserved",
+                handle.value()
+            )),
+        );
     }
     for h in &index.deleted {
         out.actions.insert(h.value(), RecordAction::Delete);

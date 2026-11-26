@@ -1126,6 +1126,17 @@ impl<'a> DwgObjectWriter<'a> {
     // â”€â”€ Insert â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn write_insert(&mut self, e: &Insert) {
+        // Replay INSERT + ATTRIB… + SEQEND verbatim when the whole chain is
+        // untouched: an untouched block reference must not be re-encoded.
+        if let (Some(seqend), false) = (e.seqend_handle.filter(|h| !h.is_null()), e.attributes.is_empty()) {
+            let mut chain = Vec::with_capacity(e.attributes.len() + 2);
+            chain.push(e.common.handle);
+            chain.extend(e.attributes.iter().map(|attribute| attribute.common.handle));
+            chain.push(seqend);
+            if chain.iter().all(|handle| !handle.is_null()) && self.try_replay_chain(&chain) {
+                return;
+            }
+        }
         let is_minsert = e.is_minsert();
         let is_view_rep = e.view_rep_handle.is_some();
         let type_code = if is_view_rep {
@@ -2665,6 +2676,19 @@ impl<'a> DwgObjectWriter<'a> {
     // â”€â”€ Polyline3D â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn write_polyline3d(&mut self, e: &Polyline3D) {
+        // Replay the whole parent + VERTEX + SEQEND chain verbatim when nothing
+        // in it changed, exactly like POLYLINE_2D.
+        if !e.vertices.is_empty() {
+            let mut chain = Vec::with_capacity(e.vertices.len() + 2);
+            chain.push(e.common.handle);
+            chain.extend(e.vertices.iter().map(|v| v.handle));
+            if let Some(seq) = e.seqend_handle {
+                chain.push(seq);
+            }
+            if self.try_replay_chain(&chain) {
+                return;
+            }
+        }
         self.entity_preamble(common::OBJ_POLYLINE_3D, &e.common);
 
         // Byte 1: smooth surface type (C# hardcodes 0)
@@ -2678,7 +2702,7 @@ impl<'a> DwgObjectWriter<'a> {
         let vertex_handles: Vec<Handle> = e.vertices.iter().map(|v| {
             if v.handle.is_null() { self.alloc_handle() } else { v.handle }
         }).collect();
-        let seqend_handle = self.alloc_handle();
+        let seqend_handle = e.seqend_handle.unwrap_or_else(|| self.alloc_handle());
 
         if self.version.r2004_plus() {
             self.writer.write_bit_long(e.vertices.len() as i32);

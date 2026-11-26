@@ -36,7 +36,13 @@ pub fn read_dgn_line_style_data(
         });
     }
 
-    let kind = DgnLsComponentType::from_code(component_type)?;
+    // The binary code is authoritative when known; the class name identifies
+    // the same object and is the safe fallback for a code this reader does not
+    // model (for example a producer-specific internal component). Only when
+    // neither source identifies the component do we let the caller preserve
+    // the record verbatim.
+    let kind = DgnLsComponentType::from_code(component_type)
+        .or_else(|| DgnLsComponentType::from_class_name(dxf_name))?;
     let scale = reader.read_bit_double();
     let property_flags = read_byte(reader);
     let component = match kind {

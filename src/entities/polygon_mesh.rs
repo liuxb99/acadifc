@@ -114,6 +114,9 @@ pub struct PolygonMesh {
     pub normal: Vector3,
     /// Mesh vertices (M × N grid)
     pub vertices: Vec<PolygonMeshVertex>,
+    /// Handle of the SEQEND that terminates this entity's child chain.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub seqend_handle: Option<crate::types::Handle>,
 }
 
 impl PolygonMesh {
@@ -130,6 +133,7 @@ impl PolygonMesh {
             elevation: 0.0,
             normal: Vector3::UNIT_Z,
             vertices: Vec::new(),
+            seqend_handle: None,
         }
     }
 

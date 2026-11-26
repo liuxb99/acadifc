@@ -99,7 +99,28 @@ impl DgnLsComponentType {
             2 => Some(Self::Compound),
             3 => Some(Self::Stroke),
             4 => Some(Self::Point),
+            // 6 is the modelled internal component. Other codes are not mapped
+            // from memory: the class name fallback below identifies them.
             6 => Some(Self::Internal),
+            _ => None,
+        }
+    }
+
+    /// Resolve the component kind from the object's class name.
+    ///
+    /// The binary component code is normally authoritative, but some producers
+    /// emit a code the current reader does not know (an internal component
+    /// variant, or a version-specific value). The class name always identifies
+    /// the object, so it is the fallback that keeps the record decodable
+    /// instead of aborting in the middle of the object stream.
+    pub fn from_class_name(dxf_name: &str) -> Option<Self> {
+        let name = dxf_name.to_ascii_uppercase();
+        match name.as_str() {
+            "LSSYMBOLCOMPONENT" => Some(Self::Symbol),
+            "LSCOMPOUNDCOMPONENT" => Some(Self::Compound),
+            "LSSTROKEPATTERNCOMPONENT" => Some(Self::Stroke),
+            "LSPOINTCOMPONENT" => Some(Self::Point),
+            "LSINTERNALCOMPONENT" => Some(Self::Internal),
             _ => None,
         }
     }
