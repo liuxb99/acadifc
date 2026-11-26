@@ -803,26 +803,32 @@ pub fn plan(document: &CadDocument) -> std::result::Result<WriterPlan, String> {
     all.sort_by_key(|h| h.value());
     for handle in all {
         let has_raw = index.raw.contains(&handle);
-        let action = if index.raw_only.contains(&handle) {
+        let action = if !same_version {
+            // The document was not read from this exact DWG version (new
+            // document, DXF import or a version conversion). There is nothing
+            // to replay and nothing is "missing": every record is written from
+            // the semantic model.
+            if index.new.contains(&handle) || !has_raw {
+                RecordAction::New
+            } else {
+                RecordAction::Rewrite(RewriteReason::VersionChanged)
+            }
+        } else if index.raw_only.contains(&handle) {
             // Not modelled, but present in the source and never deleted.
             RecordAction::Replay
         } else if index.new.contains(&handle) {
             RecordAction::New
         } else if has_raw {
-            if !same_version {
-                RecordAction::Rewrite(RewriteReason::VersionChanged)
-            } else if dirty.as_ref().is_some_and(|d| d.contains(&handle)) {
+            if dirty.as_ref().is_some_and(|d| d.contains(&handle)) {
                 RecordAction::Rewrite(RewriteReason::Dirty)
             } else {
                 RecordAction::Replay
             }
-        } else if document.version == crate::types::DxfVersion::AC1018 {
+        } else {
             RecordAction::Blocked(format!(
                 "source handle {:#X} has no preserved record",
                 handle.value()
             ))
-        } else {
-            RecordAction::Rewrite(RewriteReason::VersionChanged)
         };
         if let RecordAction::Blocked(reason) = &action {
             out.blocked.push(reason.clone());
