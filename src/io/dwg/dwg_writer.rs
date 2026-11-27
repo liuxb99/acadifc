@@ -627,13 +627,16 @@ fn write_ac18<W: Write + Seek>(
     fhw.add_section(output, section_names::CLASSES, &classes_data, true, PAGE_SIZE)?;
 
     // ── Section: SummaryInfo ──
-    let summary_data = build_summary_info(version);
+    // Native AC1018 files use a single 0x80 page for SummaryInfo (page size
+    // 0x20 + 0x80). A larger max_decomp size is not wrong per se but deviates
+    // from every AutoCAD/ODA file on record.
+    let summary_data = build_summary_info(version, document);
     fhw.add_section(
         output,
         section_names::SUMMARY_INFO,
         &summary_data,
         false,
-        0x100,
+        SMALL_PAGE,
     )?;
 
     // ── Section: Preview ──
@@ -658,8 +661,11 @@ fn write_ac18<W: Write + Seek>(
     fhw.add_section(output, section_names::APP_INFO, &app_info_data, false, SMALL_PAGE)?;
 
     // ── Section: FileDepList ──
-    let file_dep_data = build_file_dep_list();
-    fhw.add_section(output, section_names::FILE_DEP_LIST, &file_dep_data, false, SMALL_PAGE)?;
+    // Native AC1018 files keep this in one page with a 0x300 decompressed
+    // size (0x20 header + 0x300 page). Splitting it into 0x80 pages deviates
+    // from every AutoCAD/ODA file on record.
+    let file_dep_data = build_file_dep_list(document);
+    fhw.add_section(output, section_names::FILE_DEP_LIST, &file_dep_data, false, 0x300)?;
 
     // ── Section: RevHistory ──
     let rev_history_data = build_rev_history();
@@ -746,7 +752,7 @@ fn write_ac21_impl<W: Write + Seek>(
     // from ac21_section_info, so no page_size or compressed flag needed.
 
     // SummaryInfo
-    let summary_data = build_summary_info(version);
+    let summary_data = build_summary_info(version, document);
     fhw.add_section(output, section_names::SUMMARY_INFO, &summary_data)?;
 
     // Preview
@@ -766,7 +772,7 @@ fn write_ac21_impl<W: Write + Seek>(
     fhw.add_section(output, section_names::APP_INFO, &app_info_data)?;
 
     // FileDepList
-    let file_dep_data = build_file_dep_list();
+    let file_dep_data = build_file_dep_list(document);
     fhw.add_section(output, section_names::FILE_DEP_LIST, &file_dep_data)?;
 
     // RevHistory
@@ -906,7 +912,7 @@ fn build_template() -> Vec<u8> {
 /// **AC1021 (R2007)**: UTF-16LE strings.
 ///   Format: UInt16(char_count_incl_null) + UTF-16LE chars.
 ///   Empty → UInt16(1) + 0x00 0x00 = 4 bytes.
-fn build_summary_info(version: DxfVersion) -> Vec<u8> {
+fn build_summary_info(version: DxfVersion, document: &CadDocument) -> Vec<u8> {
     let mut data = Vec::with_capacity(128);
     let is_utf16 = version >= DxfVersion::AC1021;
 
@@ -924,17 +930,23 @@ fn build_summary_info(version: DxfVersion) -> Vec<u8> {
         }
     }
 
-    // Total editing time: 2 × Int32 (zeros)
-    data.extend_from_slice(&0i32.to_le_bytes());
-    data.extend_from_slice(&0i32.to_le_bytes());
+    // Total editing time (TIMEBLL: days + ms)
+    let total_edit = document.header.total_editing_time.max(0.0);
+    let edit_days = (total_edit / 86400.0) as i32;
+    let edit_ms = ((total_edit % 86400.0) * 1000.0) as i32;
+    data.extend_from_slice(&edit_ms.to_le_bytes());
+    data.extend_from_slice(&edit_days.to_le_bytes());
 
-    // Created date: 8 bytes (zeros)
-    data.extend_from_slice(&0i32.to_le_bytes());
-    data.extend_from_slice(&0i32.to_le_bytes());
+    // Created date — the header stores a julian day + ms pair.
+    let julian = document.header.update_date_julian;
+    let days = julian.trunc() as i32;
+    let ms = ((julian.fract()) * 86_400_000.0) as i32;
+    data.extend_from_slice(&ms.to_le_bytes());
+    data.extend_from_slice(&days.to_le_bytes());
 
-    // Modified date: 8 bytes (zeros)
-    data.extend_from_slice(&0i32.to_le_bytes());
-    data.extend_from_slice(&0i32.to_le_bytes());
+    // Modified date (same source value for a save: the header's update date)
+    data.extend_from_slice(&ms.to_le_bytes());
+    data.extend_from_slice(&days.to_le_bytes());
 
     // Property count: Int16 (0)
     data.extend_from_slice(&0u16.to_le_bytes());
@@ -948,13 +960,45 @@ fn build_summary_info(version: DxfVersion) -> Vec<u8> {
 
 /// Build FileDepList section data (AC18+ only).
 ///
-/// Empty dependency list (0 features, 0 files).
-fn build_file_dep_list() -> Vec<u8> {
-    let mut data = Vec::with_capacity(8);
-    // Int32: feature count (0)
-    data.extend_from_slice(&0u32.to_le_bytes());
-    // Int32: file count (0)
-    data.extend_from_slice(&0u32.to_le_bytes());
+/// Native AC1018 files always carry the "Acad:Text" feature and one entry per
+/// font/SHX file the drawing references. An all-zero (and therefore page-less)
+/// FileDepList is not something AutoCAD writes; strict consumers expect the
+/// section to have a page.
+fn build_file_dep_list(document: &CadDocument) -> Vec<u8> {
+    fn t32(out: &mut Vec<u8>, text: &str) {
+        // T32: 4-byte byte count, the bytes, no NUL terminator.
+        out.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        out.extend_from_slice(text.as_bytes());
+    }
+
+    let mut data = Vec::with_capacity(64 + document.text_styles.len() * 32);
+    // Feature table: AutoCAD writes "Acad:Text" (plus image/plot features when
+    // those object types exist; CivilCAD drawings only reference text fonts).
+    data.extend_from_slice(&1u32.to_le_bytes());
+    t32(&mut data, "Acad:Text");
+
+    // One entry per distinct font file referenced by a text style.
+    let mut fonts: Vec<&str> = document
+        .text_styles
+        .iter()
+        .map(|style| style.font_file.as_str())
+        .filter(|file| !file.trim().is_empty())
+        .collect();
+    fonts.sort_unstable();
+    fonts.dedup();
+    data.extend_from_slice(&(fonts.len() as u32).to_le_bytes());
+    for font in fonts {
+        let name = font.rsplit(['/', '\\']).next().unwrap_or(font);
+        t32(&mut data, name);            // filename
+        t32(&mut data, "");              // filepath (searched on ACAD path)
+        t32(&mut data, "");              // fingerprint
+        t32(&mut data, "");              // version
+        data.extend_from_slice(&0u32.to_le_bytes()); // feature_index (Acad:Text)
+        data.extend_from_slice(&0u32.to_le_bytes()); // timestamp
+        data.extend_from_slice(&0u32.to_le_bytes()); // filesize
+        data.extend_from_slice(&0u16.to_le_bytes()); // affects_graphics
+        data.extend_from_slice(&0u32.to_le_bytes()); // refcount
+    }
     data
 }
 
@@ -962,12 +1006,10 @@ fn build_file_dep_list() -> Vec<u8> {
 ///
 /// Empty revision history (3 × Int32 zeros).
 fn build_rev_history() -> Vec<u8> {
-    let mut data = Vec::with_capacity(16);
-    data.extend_from_slice(&0u32.to_le_bytes());
-    data.extend_from_slice(&0u32.to_le_bytes());
-    data.extend_from_slice(&1u32.to_le_bytes()); // revision counter
-    data.extend_from_slice(&0u32.to_le_bytes());
-    data
+    // Native AC1018 files carry a 12-byte, all-zero RevHistory descriptor with
+    // no data page (AutoCAD/ODA both do this for drawings never saved with
+    // DWG history). Keep the payload all-zero so no page is emitted.
+    vec![0u8; 12]
 }
 
 /// Build AcDsPrototype_1b section data (AC1027+ only).
@@ -1484,19 +1526,23 @@ mod tests {
 
     #[test]
     fn test_build_file_dep_list() {
-        let d = build_file_dep_list();
-        assert_eq!(d.len(), 8);
+        let d = build_file_dep_list(&CadDocument::new());
+        // num_features=1, "Acad:Text\0", num_files=0 → non-empty data so the
+        // section gets a real page (an all-zero payload would create none).
+        assert!(d.len() > 8);
+        assert_eq!(u32::from_le_bytes([d[0], d[1], d[2], d[3]]), 1);
     }
 
     #[test]
     fn test_build_rev_history() {
         let d = build_rev_history();
-        assert_eq!(d.len(), 16);
+        assert_eq!(d.len(), 12);
+        assert!(d.iter().all(|byte| *byte == 0));
     }
 
     #[test]
     fn test_build_summary_info_ac18() {
-        let d = build_summary_info(DxfVersion::AC1018);
+        let d = build_summary_info(DxfVersion::AC1018, &CadDocument::new());
         // 8 × 3 bytes (u16(1) + ANSI null) + 8 + 16 + 2 + 8 = 58
         assert_eq!(d.len(), 58);
         assert_eq!(u16::from_le_bytes([d[0], d[1]]), 1);
@@ -1507,7 +1553,7 @@ mod tests {
 
     #[test]
     fn test_build_summary_info_ac21() {
-        let d = build_summary_info(DxfVersion::AC1021);
+        let d = build_summary_info(DxfVersion::AC1021, &CadDocument::new());
         // 8 × 4 bytes (u16(1) + UTF-16LE null) + 8 + 16 + 2 + 8 = 66
         assert_eq!(d.len(), 66);
         // First string: u16(1) + 00 00
