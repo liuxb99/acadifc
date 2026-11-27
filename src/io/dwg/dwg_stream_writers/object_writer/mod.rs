@@ -2637,23 +2637,50 @@ impl<'a> DwgObjectWriter<'a> {
             return;
         }
         let block = if !record.block_entity_handle.is_null() {
-            let result = self.document.entity_index.get(&record.block_entity_handle)
+            // BLOCK/ENDBLK markers are *records*, not block members: the
+            // document model deliberately excludes them from `entity_index`
+            // (`CadDocument::entities()` filters Block/BlockEnd), and
+            // BLOCK_RECORD owns their handles. Looking them up in
+            // entity_index was therefore always a false positive (Phase 17
+            // review: doctor printed "BLOCK handle ... NOT in entity_index"
+            // for the default *Model_Space / *Paper_Space records and then
+            // reported zero warnings).
+            //
+            // A marker is usable when the semantic Block entity exists;
+            // otherwise it is re-synthesised from the BLOCK_RECORD (the
+            // normal path for default blocks and for blocks whose marker was
+            // never decoded). Raw replay is handled above.
+            let result = self
+                .document
+                .entity_index
+                .get(&record.block_entity_handle)
                 .and_then(|&idx| {
                     if let EntityType::Block(b) = self.document.entities[idx].as_ref() {
                         Some(b.clone())
                     } else {
-                        eprintln!("  BLOCK entity at idx {} is NOT Block type", idx);
                         None
                     }
                 });
-            if result.is_none() && self.document.entity_index.get(&record.block_entity_handle).is_none() {
-                eprintln!("  BLOCK handle {:?} NOT in entity_index for block '{}'", record.block_entity_handle, record.name);
+            if result.is_none()
+                && !record.block_entity_handle.is_null()
+                && !self
+                    .document
+                    .raw_object_records
+                    .contains_key(&record.block_entity_handle)
+                && std::env::var_os("CIVILCAD_DEBUG_BLOCKS").is_some()
+            {
+                // Genuinely unresolvable marker: keep it visible in debug
+                // builds but never as unstructured stdout noise in doctor.
+                eprintln!(
+                    "[blocks] synthesising BLOCK marker {:#X} for '{}' (no semantic entity, no raw record)",
+                    record.block_entity_handle.value(),
+                    record.name
+                );
             }
             result
         } else {
             None
         };
-
         let (handle, name, use_raw_name) = if let Some(ref b) = block {
             (b.common.handle, b.name.as_str(), true)
         } else {
