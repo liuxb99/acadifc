@@ -151,6 +151,28 @@ struct ParallelEntityBatch {
 /// makes the loader abort with `SHLOAD SHSEEK 2` while regenerating the model.
 /// Repair UTF-8-in-legacy-field damage first, keep names the code page can
 /// carry, and fall back to the standard `txt.shx` otherwise.
+
+// ── Phase 16 diagnostic: single-variable string-codec matrix ──────────────
+//
+// CIVILCAD_P16_FIX=names|styles|text|dims|all forces the selected record
+// categories through the semantic writer instead of replaying their original
+// bytes, so the effect of each string fix can be isolated on one drawing.
+// Temporary diagnostic switch only; releases never set it.
+fn p16_fix_categories() -> Option<Vec<String>> {
+    let raw = std::env::var_os("CIVILCAD_P16_FIX")?;
+    Some(raw.to_string_lossy().split(',').map(|s| s.trim().to_ascii_lowercase()).collect())
+}
+
+fn p16_category_of(type_code: i16) -> &'static str {
+    match type_code {
+        51 | 49 | 82 | 52 | 61 | 63 | 65 | 67 | 57 | 42 | 121 | 73 | 106 => "names",
+        53 => "styles",
+        1 | 2 | 3 | 44 => "text",
+        20..=26 | 69 => "dims",
+        _ => "none",
+    }
+}
+
 fn sanitize_legacy_font_name(
     name: &str,
     encoding: &'static encoding_rs::Encoding,
@@ -207,6 +229,20 @@ impl<'a> DwgObjectWriter<'a> {
         }
         if !self.plan.is_replay(handle) {
             return None;
+        }
+        if let Some(set) = p16_fix_categories() {
+            let type_code = self
+                .document
+                .raw_object_records
+                .get(&handle)
+                .map(|record| record.type_code)
+                .unwrap_or(0);
+            let category = p16_category_of(type_code);
+            if category != "none"
+                && (set.iter().any(|c| c == "all") || set.iter().any(|c| c == category))
+            {
+                return None;
+            }
         }
         // A replayed STYLE record keeps its original bytes, so a corrupted
         // font name would survive a no-op save and still crash AutoCAD. Force
