@@ -120,6 +120,68 @@ pub fn dwg_code_page_name(index: u16) -> &'static str {
     }
 }
 
+/// True when the document contains CJK text in a user-visible string.
+///
+/// Used to avoid writing Chinese content into an ANSI_1252 document: AutoCAD
+/// 2006 cannot render those bytes and reports them as `\\U+` escapes, and a
+/// font name damaged that way makes SHLOAD abort.
+pub fn document_has_cjk(document: &crate::document::CadDocument) -> bool {
+    use crate::io::dwg::legacy_text::has_cjk;
+    if has_cjk(&document.header.code_page) {
+        return false;
+    }
+    let style_strings = document
+        .text_styles
+        .iter()
+        .any(|s| has_cjk(&s.name) || has_cjk(&s.font_file) || has_cjk(&s.big_font_file));
+    if style_strings {
+        return true;
+    }
+    if document.layers.iter().any(|l| has_cjk(&l.name)) {
+        return true;
+    }
+    if document.block_records.iter().any(|b| has_cjk(&b.name)) {
+        return true;
+    }
+    document.entities().any(|e| {
+        let common = e.common();
+        has_cjk(&common.layer)
+            || match e {
+                crate::entities::EntityType::Text(t) => has_cjk(&t.value) || has_cjk(&t.style),
+                crate::entities::EntityType::MText(t) => has_cjk(&t.value) || has_cjk(&t.style),
+                _ => false,
+            }
+    })
+}
+
+/// The code page a writer must use for legacy strings.
+///
+/// Normalises the DOS-era cp ids AutoCAD never writes (CP_BIG5 24, cp932 22,
+/// cp949 25, johab 26, gb2312 31) to their ANSI equivalents, and promotes an
+/// ANSI_1252 document to BIG5 when it actually contains Chinese text.
+pub fn effective_code_page(document: &crate::document::CadDocument) -> (String, u16) {
+    let mut name = document.header.code_page.clone();
+    let mut index = document
+        .dwg_code_page_index
+        .unwrap_or_else(|| dwg_code_page_index(&name));
+    index = match index {
+        22 => 38,
+        24 => 41,
+        25 => 40,
+        26 => 42,
+        31 => 39,
+        other => other,
+    };
+    if index == 41 && name.eq_ignore_ascii_case("ansi_1252") {
+        name = "BIG5".to_string();
+    }
+    if (name.eq_ignore_ascii_case("ansi_1252") || index == 30) && document_has_cjk(document) {
+        name = "BIG5".to_string();
+        index = 41;
+    }
+    (name, index)
+}
+
 /// Convert a DXF `$DWGCODEPAGE` name to the compact DWG metadata index.
 pub fn dwg_code_page_index(code_page: &str) -> u16 {
     match code_page.to_ascii_lowercase().as_str() {

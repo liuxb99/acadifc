@@ -457,9 +457,9 @@ fn write_ac15<W: Write + Seek>(
 ) -> Result<()> {
     let mut fhw = DwgFileHeaderWriterAC15::new(version);
     fhw.set_maintenance_version(document.maintenance_version);
-    fhw.set_code_page(
-        crate::io::dxf::code_page::dwg_code_page_index(&document.header.code_page),
-    );
+    let (effective_cp_name, effective_cp_index) =
+        crate::io::dxf::code_page::effective_code_page(document);
+    fhw.set_code_page(effective_cp_index);
 
     // ── Phase 1: Compute objects FIRST to get handle map ──
     let objects_started = web_time::Instant::now();
@@ -492,7 +492,7 @@ fn write_ac15<W: Write + Seek>(
         aux_header_writer::dwg_maintenance_version(version) as u8
     };
     let header_encoding =
-        crate::io::dxf::code_page::encoding_from_code_page(&document.header.code_page)
+        crate::io::dxf::code_page::encoding_from_code_page(&effective_cp_name)
             .unwrap_or(encoding_rs::WINDOWS_1252);
     let header_data = header_writer::write_header_with_encoding(
         version,
@@ -583,12 +583,16 @@ fn write_ac18<W: Write + Seek>(
     if document.dwg_source_version == Some(version) {
         fhw.set_app_version_bytes(document.app_version_byte, document.app_maintenance_byte);
     }
+    let (effective_cp_name, effective_cp_index) =
+        crate::io::dxf::code_page::effective_code_page(document);
     let code_page = if crate::io::dwg::p14_fix_enabled("codepage") {
-        document.dwg_code_page_index.unwrap_or_else(|| {
-            crate::io::dxf::code_page::dwg_code_page_index(&document.header.code_page)
-        })
+        if document.dwg_code_page_index.is_some() {
+            effective_cp_index
+        } else {
+            crate::io::dxf::code_page::dwg_code_page_index(&effective_cp_name)
+        }
     } else {
-        crate::io::dxf::code_page::dwg_code_page_index(&document.header.code_page)
+        crate::io::dxf::code_page::dwg_code_page_index(&effective_cp_name)
     };
     fhw.set_code_page(code_page);
 
@@ -631,7 +635,7 @@ fn write_ac18<W: Write + Seek>(
 
     // ── Section: Header (uses synced + corrected header) ──
     let header_encoding =
-        crate::io::dxf::code_page::encoding_from_code_page(&document.header.code_page)
+        crate::io::dxf::code_page::encoding_from_code_page(&effective_cp_name)
             .unwrap_or(encoding_rs::WINDOWS_1252);
     let header_data = header_writer::write_header_with_encoding(
         version,
@@ -837,6 +841,7 @@ fn write_ac21_impl<W: Write + Seek>(
 
     // Classes
     let classes: Vec<_> = document.classes.iter().cloned().collect();
+    let (effective_cp_name, _) = crate::io::dxf::code_page::effective_code_page(document);
     let maint = document.maintenance_version;
     let maintenance_version = if document.maintenance_version != 0 {
         document.maintenance_version
@@ -844,7 +849,7 @@ fn write_ac21_impl<W: Write + Seek>(
         aux_header_writer::dwg_maintenance_version(version) as u8
     };
     let header_encoding =
-        crate::io::dxf::code_page::encoding_from_code_page(&document.header.code_page)
+        crate::io::dxf::code_page::encoding_from_code_page(&effective_cp_name)
             .unwrap_or(encoding_rs::WINDOWS_1252);
     let classes_data = classes_writer::write_classes_with_encoding(
         version,

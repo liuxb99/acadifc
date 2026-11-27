@@ -22,11 +22,60 @@ use std::sync::RwLock;
 const MARKER_BASE: u32 = 0xE000;
 const MARKER: char = '\u{E000}';
 
+/// True when the string contains CJK / non-Latin text (used to pick a code page).
+pub(crate) fn has_cjk(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF)
+    })
+}
+
+/// Repair a UTF-8 string that was decoded with a single-byte code page.
+///
+/// AutoCAD 2006 only understands single-byte legacy strings, but third-party
+/// tools sometimes wrote UTF-8 into those fields.  Reading such a file with
+/// the drawing code page yields Latin-1 mojibake (`ï¿½`, `Ã¤`, ...), which
+/// makes AutoCAD try to load a font whose name contains those characters and
+/// abort with `SHLOAD SHSEEK`.  When the bytes form valid UTF-8 we can recover
+/// the intended text losslessly.
+pub(crate) fn repair_utf8_mojibake(encoding: &'static Encoding, text: &str) -> Option<String> {
+    if text.is_ascii() || text.contains(MARKER) {
+        return None;
+    }
+    // Only attempt a repair when every character is representable in the
+    // source code page; otherwise the byte round-trip is ambiguous.
+    let mut bytes = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let mut buf = [0u8; 8];
+        let one = ch.encode_utf8(&mut buf);
+        let (encoded, _, unencodable) = encoding.encode(one);
+        if unencodable || encoded.len() != 1 {
+            return None;
+        }
+        bytes.push(encoded[0]);
+    }
+    let candidate = std::str::from_utf8(&bytes).ok()?;
+    if candidate.is_ascii() {
+        return None;
+    }
+    if has_cjk(candidate) || candidate.chars().all(|c| !c.is_control()) {
+        return Some(candidate.to_string());
+    }
+    None
+}
+
 /// Decode a legacy DWG string, preserving undecodable bytes reversibly.
 pub(crate) fn decode_legacy_text(encoding: &'static Encoding, bytes: &[u8]) -> String {
     let (decoded, _, had_errors) = encoding.decode(bytes);
     let decoded = decoded.replace('\0', "");
     if !had_errors {
+        // Repair UTF-8 written into a single-byte field by older tools (see
+        // `repair_utf8_mojibake`): preferred over keeping mojibake, which makes
+        // AutoCAD 2006 abort while loading the substituted font.
+        if let Some(utf8) = std::str::from_utf8(bytes).ok().filter(|s| !s.is_ascii()) {
+            if has_cjk(utf8) && !has_cjk(&decoded) {
+                return decode_unicode_escapes(utf8);
+            }
+        }
         return decode_unicode_escapes(&decoded);
     }
 

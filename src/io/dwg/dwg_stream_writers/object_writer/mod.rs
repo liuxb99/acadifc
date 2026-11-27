@@ -143,6 +143,57 @@ struct ParallelEntityBatch {
     fidelity_errors: Vec<String>,
 }
 
+
+/// Sanitize a pre-R2007 STYLE font file name.
+///
+/// AutoCAD 2006 loads SHX files through `SHLOAD`; a name containing mojibake,
+/// U+FFFD or other bytes that are not representable in the drawing code page
+/// makes the loader abort with `SHLOAD SHSEEK 2` while regenerating the model.
+/// Repair UTF-8-in-legacy-field damage first, keep names the code page can
+/// carry, and fall back to the standard `txt.shx` otherwise.
+fn sanitize_legacy_font_name(
+    name: &str,
+    encoding: &'static encoding_rs::Encoding,
+) -> String {
+    if name.is_empty() {
+        return String::new();
+    }
+    let repaired =
+        crate::io::dwg::legacy_text::repair_utf8_mojibake(encoding, name)
+            .unwrap_or_else(|| name.to_string());
+    // A literal AutoCAD `\U+XXXX` escape, a replacement character or a
+    // control character is never a real font file name and is handed to
+    // SHLOAD verbatim. (A Windows absolute path with backslashes is valid and
+    // must be preserved.)
+    if repaired.contains("\\U+")
+        || repaired.contains('\u{FFFD}')
+        || repaired.chars().any(|c| c.is_control())
+    {
+        return "txt.shx".to_string();
+    }
+    if repaired.is_ascii() {
+        return repaired;
+    }
+    // Only genuine CJK font file names may stay non-ASCII; Latin-1 mojibake
+    // from a damaged UTF-8 write must never reach SHLOAD.
+    if !crate::io::dwg::legacy_text::has_cjk(&repaired) {
+        return "txt.shx".to_string();
+    }
+    let encodable = repaired.chars().all(|ch| {
+        let mut buf = [0u8; 8];
+        let one = ch.encode_utf8(&mut buf);
+        let (_, _, unencodable) = encoding.encode(one);
+        !unencodable
+    });
+    if encodable {
+        repaired
+    } else {
+        // Deterministic, always-installed substitute: never let a font name
+        // that cannot round-trip reach SHLOAD.
+        "txt.shx".to_string()
+    }
+}
+
 impl<'a> DwgObjectWriter<'a> {
     /// Return the original record bytes for an untouched, same-version object.
     /// Only AC1018 text updates opt into this MVP; changed handles and any
@@ -157,6 +208,25 @@ impl<'a> DwgObjectWriter<'a> {
         if !self.plan.is_replay(handle) {
             return None;
         }
+        // A replayed STYLE record keeps its original bytes, so a corrupted
+        // font name would survive a no-op save and still crash AutoCAD. Force
+        // such styles through the semantic writer so the name is sanitized.
+        if let Some(style) = self
+            .document
+            .text_styles
+            .iter()
+            .find(|style| style.handle.value() == handle.value())
+        {
+            let encoding = crate::io::dxf::code_page::encoding_from_code_page(
+                &self.document.header.code_page,
+            )
+            .unwrap_or(encoding_rs::WINDOWS_1252);
+            if sanitize_legacy_font_name(&style.font_file, encoding) != style.font_file
+                || sanitize_legacy_font_name(&style.big_font_file, encoding) != style.big_font_file
+            {
+                return None;
+            }
+        }
         self.document
             .raw_object_records
             .get(&handle)
@@ -168,8 +238,9 @@ impl<'a> DwgObjectWriter<'a> {
     pub fn new(document: &'a CadDocument) -> crate::error::Result<Self> {
         let version = DwgVersion::from_dxf_version(document.version)?;
         let dxf_version = document.version;
+        let (effective_cp_name, _) = crate::io::dxf::code_page::effective_code_page(document);
         let encoding =
-            crate::io::dxf::code_page::encoding_from_code_page(&document.header.code_page)
+            crate::io::dxf::code_page::encoding_from_code_page(&effective_cp_name)
                 .unwrap_or(encoding_rs::WINDOWS_1252);
         let writer = DwgMergedWriter::with_encoding(version, dxf_version, encoding);
 
@@ -975,9 +1046,26 @@ impl<'a> DwgObjectWriter<'a> {
         // Last height (must be > 0; use effective_last_height)
         self.writer.write_bit_double(style.effective_last_height());
         // Font name
-        self.writer.write_variable_text(&style.font_file);
-        // Big font name
-        self.writer.write_variable_text(&style.big_font_file);
+        let (effective_cp_name, _) =
+            crate::io::dxf::code_page::effective_code_page(self.document);
+        let font_encoding = crate::io::dxf::code_page::encoding_from_code_page(
+            &effective_cp_name,
+        )
+        .unwrap_or(encoding_rs::WINDOWS_1252);
+        if self.dxf_version <= crate::types::DxfVersion::AC1018 {
+            self.writer.write_variable_text(&sanitize_legacy_font_name(
+                &style.font_file,
+                font_encoding,
+            ));
+            // Big font name
+            self.writer.write_variable_text(&sanitize_legacy_font_name(
+                &style.big_font_file,
+                font_encoding,
+            ));
+        } else {
+            self.writer.write_variable_text(&style.font_file);
+            self.writer.write_variable_text(&style.big_font_file);
+        }
 
         // External reference block handle (hard pointer). Only xref-dependent
         // styles reference a block; everything else is null.
@@ -2155,8 +2243,10 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn serialize_parallel_entity_batch(&self, handles: &[Handle]) -> ParallelEntityBatch {
+        let (effective_cp_name, _) =
+            crate::io::dxf::code_page::effective_code_page(self.document);
         let encoding =
-            crate::io::dxf::code_page::encoding_from_code_page(&self.document.header.code_page)
+            crate::io::dxf::code_page::encoding_from_code_page(&effective_cp_name)
                 .unwrap_or(encoding_rs::WINDOWS_1252);
         let mut worker = Self {
             version: self.version,
@@ -2661,5 +2751,36 @@ mod tests {
             let marker = i32::from_le_bytes([output[0], output[1], output[2], output[3]]);
             assert_eq!(marker, 0x0DCA);
         }
+    }
+}
+
+#[cfg(test)]
+mod p15_font_tests {
+    use super::sanitize_legacy_font_name;
+
+    #[test]
+    fn ascii_font_names_pass_through() {
+        let enc = encoding_rs::BIG5;
+        assert_eq!(sanitize_legacy_font_name("txt.shx", enc), "txt.shx");
+        assert_eq!(sanitize_legacy_font_name("sino161.shx", enc), "sino161.shx");
+        assert_eq!(sanitize_legacy_font_name("", enc), "");
+    }
+
+    #[test]
+    fn latin1_mojibake_becomes_safe_substitute() {
+        // Bytes an older build left behind when it wrote UTF-8 into a
+        // single-byte field; AutoCAD 2006 aborts in SHLOAD on these.
+        let enc = encoding_rs::BIG5;
+        assert_eq!(
+            sanitize_legacy_font_name("ï¿½Ø±dï¿½Ê.shx", enc),
+            "txt.shx"
+        );
+        assert_eq!(sanitize_legacy_font_name(r"\U+00EF\U+00BF.shx", enc), "txt.shx");
+    }
+
+    #[test]
+    fn cjk_font_name_is_kept_when_encodable() {
+        let enc = encoding_rs::BIG5;
+        assert_eq!(sanitize_legacy_font_name("華康.shx", enc), "華康.shx");
     }
 }

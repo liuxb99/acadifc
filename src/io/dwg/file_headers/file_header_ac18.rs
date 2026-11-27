@@ -138,8 +138,48 @@ impl DwgFileHeaderWriterAC18 {
             self.app_maintenance_byte = Some(0);
             return;
         }
-        self.app_version_byte = version;
-        self.app_maintenance_byte = maintenance;
+        // Only pairs AutoCAD/ODA actually write are legal. A preserved pair
+        // such as (0x21, 0x00) inside an AC1018 file is exactly what made
+        // AutoCAD 2006 dispatch the wrong object-layout parser.
+        let format_release = self.format_release_byte();
+        let legal = match version {
+            None => false,
+            Some(release) => {
+                let maint = maintenance.unwrap_or(0);
+                let known: &[u8] = match release {
+                    0x17 => &[0x0F],
+                    0x19 => &[0x00, 0x44, 0x4C, 0x68],
+                    0x1B => &[0x00, 0x32],
+                    0x1D => &[0x00, 0x6D],
+                    0x1F => &[0x00, 0x7D],
+                    0x21 => &[0x00, 0xAE, 0xE4],
+                    _ => &[],
+                };
+                release >= format_release
+                    && known.contains(&maint)
+                    && (maint != 0 || release == format_release)
+            }
+        };
+        if legal {
+            self.app_version_byte = version;
+            self.app_maintenance_byte = maintenance;
+        } else {
+            self.app_version_byte = Some(format_release);
+            self.app_maintenance_byte = Some(0);
+        }
+    }
+
+    /// Release byte of the file format being written (0x19 for AC1018 …).
+    fn format_release_byte(&self) -> u8 {
+        match self.version {
+            DxfVersion::AC1015 => 0x15,
+            DxfVersion::AC1018 => 0x19,
+            DxfVersion::AC1021 => 0x1B,
+            DxfVersion::AC1024 => 0x1D,
+            DxfVersion::AC1027 => 0x1F,
+            DxfVersion::AC1032 => 0x21,
+            _ => 0x19,
+        }
     }
 
     /// The DWG release byte stored at file-header offset 0x11.
