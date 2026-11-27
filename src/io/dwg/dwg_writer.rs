@@ -397,10 +397,14 @@ fn prepare_header(
         h.handle_seed = max_handle + 1;
     }
 
-    // ── Update model-space extents ──
-    if let Some(ref ext) = extents {
-        h.model_space_extents_min = ext.min;
-        h.model_space_extents_max = ext.max;
+    // ── Update model-space extents (new documents only) ──
+    // For a read→write pass the source header variables must be preserved
+    // verbatim; recomputing EXTMIN/EXTMAX changed them on a no-op save.
+    if document.dwg_source_version.is_none() {
+        if let Some(ref ext) = extents {
+            h.model_space_extents_min = ext.min;
+            h.model_space_extents_max = ext.max;
+        }
     }
 
     h
@@ -473,6 +477,11 @@ fn write_ac15<W: Write + Seek>(
 
     // ── Section: Header (uses synced + corrected header) ──
     let maint = document.maintenance_version;
+    let maintenance_version = if document.maintenance_version != 0 {
+        document.maintenance_version
+    } else {
+        aux_header_writer::dwg_maintenance_version(version) as u8
+    };
     let header_encoding =
         crate::io::dxf::code_page::encoding_from_code_page(&document.header.code_page)
             .unwrap_or(encoding_rs::WINDOWS_1252);
@@ -506,7 +515,7 @@ fn write_ac15<W: Write + Seek>(
     fhw.add_section(section_names::TEMPLATE, template);
 
     // ── Section: AuxHeader (uses corrected HANDSEED) ──
-    let aux_data = aux_header_writer::write_aux_header(version, &corrected_header);
+    let aux_data = aux_header_writer::write_aux_header(version, maintenance_version, &corrected_header);
     fhw.add_section(section_names::AUX_HEADER, aux_data);
 
     // ── Section: Handles (must be last — needs objects offset) ──
@@ -586,6 +595,15 @@ fn write_ac18<W: Write + Seek>(
     // ── Phase 2: Prepare header (sync handles + correct HANDSEED) ──
     let corrected_header = prepare_header(document, &handle_map_u32, &extents);
 
+    // The AuxHeader and the file-header metadata must agree on the
+    // maintenance release; preserve the source value when we have one.
+    let maint = document.maintenance_version;
+    let maintenance_version = if maint != 0 {
+        maint
+    } else {
+        aux_header_writer::dwg_maintenance_version(version) as u8
+    };
+
     // ── Section: Header (uses synced + corrected header) ──
     let header_encoding =
         crate::io::dxf::code_page::encoding_from_code_page(&document.header.code_page)
@@ -648,7 +666,7 @@ fn write_ac18<W: Write + Seek>(
     fhw.add_section(output, section_names::REV_HISTORY, &rev_history_data, true, PAGE_SIZE)?;
 
     // ── Section: AuxHeader (uses corrected HANDSEED) ──
-    let aux_data = aux_header_writer::write_aux_header(version, &corrected_header);
+    let aux_data = aux_header_writer::write_aux_header(version, maintenance_version, &corrected_header);
     fhw.add_section(output, section_names::AUX_HEADER, &aux_data, true, PAGE_SIZE)?;
 
     // ── Section: AcDbObjects (pre-computed) ──
@@ -784,6 +802,11 @@ fn write_ac21_impl<W: Write + Seek>(
     // Classes
     let classes: Vec<_> = document.classes.iter().cloned().collect();
     let maint = document.maintenance_version;
+    let maintenance_version = if document.maintenance_version != 0 {
+        document.maintenance_version
+    } else {
+        aux_header_writer::dwg_maintenance_version(version) as u8
+    };
     let header_encoding =
         crate::io::dxf::code_page::encoding_from_code_page(&document.header.code_page)
             .unwrap_or(encoding_rs::WINDOWS_1252);
@@ -796,7 +819,7 @@ fn write_ac21_impl<W: Write + Seek>(
     fhw.add_section(output, section_names::CLASSES, &classes_data)?;
 
     // AuxHeader (uses corrected HANDSEED)
-    let aux_data = aux_header_writer::write_aux_header(version, &corrected_header);
+    let aux_data = aux_header_writer::write_aux_header(version, maintenance_version, &corrected_header);
     fhw.add_section(output, section_names::AUX_HEADER, &aux_data)?;
 
     // Header (uses corrected HANDSEED)

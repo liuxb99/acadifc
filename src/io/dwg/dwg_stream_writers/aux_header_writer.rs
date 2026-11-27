@@ -50,13 +50,25 @@ pub fn dwg_maintenance_version(version: DxfVersion) -> i16 {
 ///
 /// # Returns
 /// Raw section bytes.
-pub fn write_aux_header(version: DxfVersion, header: &HeaderVariables) -> Vec<u8> {
+pub fn write_aux_header(
+    version: DxfVersion,
+    maintenance_version: u8,
+    header: &HeaderVariables,
+) -> Vec<u8> {
     let dwg_version = DwgVersion::from_dxf_version(version)
         .unwrap_or(DwgVersion::AC15);
     let mut writer = DwgBitWriter::new(dwg_version, version);
 
     let internal_ver = dwg_internal_version(version);
-    let maintenance_ver: i16 = dwg_maintenance_version(version);
+    // The AuxHeader must agree with the file-header metadata byte (0x0B):
+    // real files carry the saving application's maintenance release (e.g. 76
+    // for AutoCAD 2006 AC1018), and a mismatch makes strict consumers reject
+    // the file as inconsistent.
+    let maintenance_ver: i16 = if maintenance_version != 0 {
+        maintenance_version as i16
+    } else {
+        dwg_maintenance_version(version)
+    };
 
     // RC: 0xFF, 0x77, 0x01
     writer.write_byte(0xFF);
