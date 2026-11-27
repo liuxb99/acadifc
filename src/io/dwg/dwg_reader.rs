@@ -779,6 +779,7 @@ impl<R: Read + Seek> DwgReader<R> {
     /// In failsafe mode, file-header errors are caught and a partial
     /// document is returned instead of propagating the error.
     pub fn read(&mut self) -> std::result::Result<crate::document::CadDocument, DxfError> {
+        crate::io::dwg::repair_report::begin_document();
         let failsafe = self.options.failsafe;
         let perf = std::env::var_os("PERF").is_some();
         let total_started = web_time::Instant::now();

@@ -82,6 +82,7 @@ pub(crate) fn decode_legacy_text(encoding: &'static Encoding, bytes: &[u8]) -> S
     if let Ok(utf8) = std::str::from_utf8(bytes) {
         if !utf8.is_ascii() && utf8 != decoded {
             REPAIR_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::io::dwg::repair_report::record(bytes, utf8);
             return decode_unicode_escapes(utf8);
         }
     }

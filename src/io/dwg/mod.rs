@@ -87,6 +87,8 @@ pub use file_headers::{DwgFileHeaderWriterAC15, DwgFileHeaderWriterAC18};
 /// `none` (or `CIVILCAD_P14_BASELINE=1`) to reproduce the pre-Phase-14 writer.
 /// This exists only to build the single-variable compatibility matrix and is
 /// never used by the product paths.
+pub mod repair_report;
+
 pub fn p14_fix_enabled(name: &str) -> bool {
     if std::env::var_os("CIVILCAD_P14_BASELINE").is_some() {
         return false;

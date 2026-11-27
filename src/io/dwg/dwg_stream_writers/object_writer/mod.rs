@@ -191,6 +191,17 @@ pub(crate) fn validate_font_name(
     if name.is_empty() {
         return Ok(String::new());
     }
+    if name.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(format!("font name {name:?} contains a NUL or control character"));
+    }
+    if kind == FontKind::BigFont {
+        let lower = name.to_ascii_lowercase();
+        if lower.ends_with(".ttf") || lower.ends_with(".ttc") || lower.ends_with(".otf") {
+            return Err(format!(
+                "BigFont {name:?} is a TrueType/OpenType file; BigFont must be an SHX shape font"
+            ));
+        }
+    }
     if name.contains("\\U+") {
         return Err(format!(
             "font name {name:?} contains a literal AutoCAD escape (never a real file name)"

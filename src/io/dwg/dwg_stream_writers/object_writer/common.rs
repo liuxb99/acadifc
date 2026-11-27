@@ -257,6 +257,22 @@ impl<'a> DwgObjectWriter<'a> {
     /// and non-graphical objects (Phase 9 P0-4): every record class goes through
     /// the same per-handle decision instead of ad-hoc early returns.
     pub(super) fn try_replay_raw(&mut self, handle: Handle) -> bool {
+        // Phase 17 item 1: when source and target code pages differ, an object
+        // whose record type has no semantic (string-aware) re-encoder is
+        // raw-only: its bytes would carry the source code page into the target
+        // file. Fail closed instead of silently copying it.
+        if self.encoding_ctx.transcoding {
+            if let Some(record) = self.document.raw_object_records.get(&handle) {
+                if super::p16_category_of(record.type_code) == "none" {
+                    self.fidelity_errors.push(format!(
+                        "raw-only object handle={:#X} type={} cannot be transcoded (source codepage {} -> target codepage {}); refusing to copy original bytes",
+                        handle.value(), record.type_code,
+                        self.encoding_ctx.source_codepage_id, self.encoding_ctx.codepage_id
+                    ));
+                    return true; // bytes are not published: reject_fidelity_errors aborts the write
+                }
+            }
+        }
         let Some(record) = self.preserved_raw_record(handle) else {
             return false;
         };
