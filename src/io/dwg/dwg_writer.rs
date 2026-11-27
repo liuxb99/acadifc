@@ -190,6 +190,7 @@ fn prepare_header(
     document: &CadDocument,
     handle_map: &[(u64, u32)],
     extents: &Option<crate::types::BoundingBox3D>,
+    geometry_changed: bool,
 ) -> HeaderVariables {
     let mut h = document.header.clone();
     let emitted = |handle: Handle| {
@@ -397,10 +398,13 @@ fn prepare_header(
         h.handle_seed = max_handle + 1;
     }
 
-    // ── Update model-space extents (new documents only) ──
-    // For a read→write pass the source header variables must be preserved
-    // verbatim; recomputing EXTMIN/EXTMAX changed them on a no-op save.
-    if document.dwg_source_version.is_none() {
+    // ── Update model-space extents only when geometry actually changed ──
+    // A no-op save must keep the source EXTMIN/EXTMAX verbatim; an edited
+    // drawing must recompute them so zoom-extents/limits stay correct.
+    let preserve = crate::io::dwg::p14_fix_enabled("extents_preserve")
+        && !geometry_changed
+        && document.dwg_source_version.is_some();
+    if !preserve {
         if let Some(ref ext) = extents {
             h.model_space_extents_min = ext.min;
             h.model_space_extents_max = ext.max;
@@ -460,9 +464,14 @@ fn write_ac15<W: Write + Seek>(
     // ── Phase 1: Compute objects FIRST to get handle map ──
     let objects_started = web_time::Instant::now();
     let obj_writer = DwgObjectWriter::new(document)?;
-    let (obj_data, handle_map_u32, extents, _sab_entries, fidelity_errors, _writer_report) =
+    let (obj_data, handle_map_u32, extents, _sab_entries, fidelity_errors, writer_report) =
         obj_writer.write();
     reject_fidelity_errors(fidelity_errors)?;
+    let geometry_changed = writer_report.rewritten + writer_report.new_objects
+        + writer_report.deleted
+        > 0
+        || !writer_report.blocked.is_empty()
+        || !writer_report.errors.is_empty();
     if std::env::var_os("PERF").is_some() {
         eprintln!(
             "[perf] dwg-write objects={:.1}ms bytes={} handles={} format=ac15",
@@ -473,7 +482,7 @@ fn write_ac15<W: Write + Seek>(
     }
 
     // ── Phase 2: Prepare header (sync handles + correct HANDSEED) ──
-    let corrected_header = prepare_header(document, &handle_map_u32, &extents);
+    let corrected_header = prepare_header(document, &handle_map_u32, &extents, geometry_changed);
 
     // ── Section: Header (uses synced + corrected header) ──
     let maint = document.maintenance_version;
@@ -567,10 +576,21 @@ fn write_ac18<W: Write + Seek>(
 
     // AC18 writer reserves 0x100 bytes at file start for metadata
     let mut fhw = DwgFileHeaderWriterAC18::new(version, maint, output)?;
-    fhw.set_app_version_bytes(document.app_version_byte, document.app_maintenance_byte);
-    fhw.set_code_page(document.dwg_code_page_index.unwrap_or_else(|| {
+    // The app-version bytes describe the program that saved the file. Only
+    // preserve them when we are saving the same format we read; a cross-version
+    // SaveAs must advertise the target format instead (a 2018 app byte on an
+    // AC1018 file is legal only for files actually saved by that app).
+    if document.dwg_source_version == Some(version) {
+        fhw.set_app_version_bytes(document.app_version_byte, document.app_maintenance_byte);
+    }
+    let code_page = if crate::io::dwg::p14_fix_enabled("codepage") {
+        document.dwg_code_page_index.unwrap_or_else(|| {
+            crate::io::dxf::code_page::dwg_code_page_index(&document.header.code_page)
+        })
+    } else {
         crate::io::dxf::code_page::dwg_code_page_index(&document.header.code_page)
-    }));
+    };
+    fhw.set_code_page(code_page);
 
     // R2004+ default page size for most sections
     const PAGE_SIZE: usize = 0x7400;
@@ -580,9 +600,14 @@ fn write_ac18<W: Write + Seek>(
     // ── Phase 1: Compute objects FIRST to get handle map ──
     let objects_started = web_time::Instant::now();
     let obj_writer = DwgObjectWriter::new(document)?;
-    let (obj_data, handle_map_u32, extents, sab_entries, fidelity_errors, _writer_report) =
+    let (obj_data, handle_map_u32, extents, sab_entries, fidelity_errors, writer_report) =
         obj_writer.write();
     reject_fidelity_errors(fidelity_errors)?;
+    let geometry_changed = writer_report.rewritten + writer_report.new_objects
+        + writer_report.deleted
+        > 0
+        || !writer_report.blocked.is_empty()
+        || !writer_report.errors.is_empty();
     if std::env::var_os("PERF").is_some() {
         eprintln!(
             "[perf] dwg-write objects={:.1}ms bytes={} handles={} format=ac18",
@@ -593,7 +618,7 @@ fn write_ac18<W: Write + Seek>(
     }
 
     // ── Phase 2: Prepare header (sync handles + correct HANDSEED) ──
-    let corrected_header = prepare_header(document, &handle_map_u32, &extents);
+    let corrected_header = prepare_header(document, &handle_map_u32, &extents, geometry_changed);
 
     // The AuxHeader and the file-header metadata must agree on the
     // maintenance release; preserve the source value when we have one.
@@ -732,9 +757,14 @@ fn write_ac21_impl<W: Write + Seek>(
     // ── Phase 1: Compute objects FIRST to get handle map ──
     let objects_started = web_time::Instant::now();
     let obj_writer = DwgObjectWriter::new(document)?;
-    let (obj_data, handle_map_u32, extents, sab_entries, fidelity_errors, _writer_report) =
+    let (obj_data, handle_map_u32, extents, sab_entries, fidelity_errors, writer_report) =
         obj_writer.write();
     reject_fidelity_errors(fidelity_errors)?;
+    let geometry_changed = writer_report.rewritten + writer_report.new_objects
+        + writer_report.deleted
+        > 0
+        || !writer_report.blocked.is_empty()
+        || !writer_report.errors.is_empty();
     if std::env::var_os("PERF").is_some() {
         eprintln!(
             "[perf] dwg-write objects={:.1}ms bytes={} handles={} format=ac21",
@@ -745,7 +775,7 @@ fn write_ac21_impl<W: Write + Seek>(
     }
 
     // ── Phase 2: Prepare header (sync handles + correct HANDSEED) ──
-    let corrected_header = prepare_header(document, &handle_map_u32, &extents);
+    let corrected_header = prepare_header(document, &handle_map_u32, &extents, geometry_changed);
 
     // ── Sections in spec §5.1 stream order ──
     // AC21 add_section looks up encoding/encryption/page_size automatically
@@ -1701,7 +1731,7 @@ mod tests {
 
         // prepare_header should sync all handles from document objects
         let handle_map = vec![(1u64, 0u32), (2, 100), (3, 200)]; // dummy
-        let prepared = prepare_header(&doc, &handle_map, &None);
+        let prepared = prepare_header(&doc, &handle_map, &None, false);
 
         // Table control handles must be synced from the actual table objects
         assert_eq!(prepared.block_control_handle, correct_block_control,

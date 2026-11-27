@@ -78,3 +78,30 @@ pub(crate) fn sab_fingerprint<'a>(
     fingerprint
 }
 pub use file_headers::{DwgFileHeaderWriterAC15, DwgFileHeaderWriterAC18};
+
+/// Phase 14/15 diagnostic switches.
+///
+/// `CIVILCAD_P14_FIXES` is a comma separated allow-list of the AC1018 writer
+/// fixes (`release_byte`, `app_version_bytes`, `codepage`, `aux_maintenance`,
+/// `extents_preserve`, `appinfo_r18`). Unset means "all fixes on"; set to
+/// `none` (or `CIVILCAD_P14_BASELINE=1`) to reproduce the pre-Phase-14 writer.
+/// This exists only to build the single-variable compatibility matrix and is
+/// never used by the product paths.
+pub fn p14_fix_enabled(name: &str) -> bool {
+    if std::env::var_os("CIVILCAD_P14_BASELINE").is_some() {
+        return false;
+    }
+    match std::env::var("CIVILCAD_P14_FIXES") {
+        Ok(value) => {
+            let value = value.trim().to_ascii_lowercase();
+            if value.is_empty() || value == "none" {
+                return false;
+            }
+            if value == "all" {
+                return true;
+            }
+            value.split(',').map(str::trim).any(|part| part == name)
+        }
+        Err(_) => true,
+    }
+}

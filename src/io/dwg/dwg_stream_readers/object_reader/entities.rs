@@ -1248,7 +1248,11 @@ fn read_lwpolyline_impl(
         Vector3::UNIT_Z
     };
 
-    let num_pts = safe_count(reader.read_bit_long());
+    let raw_num_pts = reader.read_bit_long();
+    let num_pts = safe_count(raw_num_pts);
+    if std::env::var_os("ACAD_READ_TRACE").is_some() {
+        eprintln!("[lwpoly] raw_pts={raw_num_pts} safe_pts={num_pts}");
+    }
     let num_bulges = if has_bulges {
         safe_count(reader.read_bit_long())
     } else {
@@ -1728,7 +1732,11 @@ pub fn read_leader(
     let annotation_type = reader.read_bit_short();
     let path_type = reader.read_bit_short();
 
-    let num_pts = safe_count(reader.read_bit_long());
+    let raw_num_pts = reader.read_bit_long();
+    let num_pts = safe_count(raw_num_pts);
+    if std::env::var_os("ACAD_READ_TRACE").is_some() {
+        eprintln!("[lwpoly] raw_pts={raw_num_pts} safe_pts={num_pts}");
+    }
     let mut vertices = Vec::with_capacity(num_pts as usize);
     for _ in 0..num_pts {
         vertices.push(reader.read_3bit_double());
@@ -5761,7 +5769,11 @@ fn read_wire(reader: &mut DwgMergedReader, version: DwgVersion) -> Wire {
         reader.read_bit_short() as i32
     };
     let acis_index = reader.read_bit_long();
-    let num_pts = safe_count(reader.read_bit_long());
+    let raw_num_pts = reader.read_bit_long();
+    let num_pts = safe_count(raw_num_pts);
+    if std::env::var_os("ACAD_READ_TRACE").is_some() {
+        eprintln!("[lwpoly] raw_pts={raw_num_pts} safe_pts={num_pts}");
+    }
     let mut pts = Vec::with_capacity(num_pts as usize);
     for _ in 0..num_pts {
         pts.push(reader.read_3bit_double());

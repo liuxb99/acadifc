@@ -465,8 +465,14 @@ impl DwgObjectReader {
             } else {
                 reader.read_raw_long() as i64
             };
-            let mut gdata = Vec::with_capacity(graphic_size.max(0) as usize);
-            for _ in 0..graphic_size.max(0) {
+            // A corrupt record can claim an arbitrary graphic-data length.
+            // Never trust it beyond the bytes actually left in the record:
+            // allocating/looping over billions of phantom bytes is a denial of
+            // service (observed as a 100% CPU hang on a fuzzed AC1018 file).
+            let limit = reader.remaining_bytes().max(0) as i64;
+            let graphic_size = graphic_size.clamp(0, limit) as usize;
+            let mut gdata = Vec::with_capacity(graphic_size.min(1 << 20));
+            for _ in 0..graphic_size {
                 gdata.push(reader.read_byte());
             }
             Some(gdata)

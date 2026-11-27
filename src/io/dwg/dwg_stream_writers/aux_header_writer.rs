@@ -34,6 +34,10 @@ fn dwg_internal_version(version: DxfVersion) -> i16 {
 /// Must match the file header metadata maintenance byte (0x0B, 0x12).
 pub fn dwg_maintenance_version(version: DxfVersion) -> i16 {
     match version {
+        // AutoCAD 2006 stores 76 (0x4C) in AC1018 files; ODA writes 104
+        // (0x68) and LibreDWG's release table records 0x68 for R2004. Both
+        // are accepted by our container checker.
+        DxfVersion::AC1018 => 76,  // 0x4C
         DxfVersion::AC1021 => 25,  // 0x19
         DxfVersion::AC1024 => 30,  // 0x1E
         DxfVersion::AC1027 => 29,  // 0x1D
@@ -64,7 +68,9 @@ pub fn write_aux_header(
     // real files carry the saving application's maintenance release (e.g. 76
     // for AutoCAD 2006 AC1018), and a mismatch makes strict consumers reject
     // the file as inconsistent.
-    let maintenance_ver: i16 = if maintenance_version != 0 {
+    let maintenance_ver: i16 = if !crate::io::dwg::p14_fix_enabled("aux_maintenance") {
+        0
+    } else if maintenance_version != 0 {
         maintenance_version as i16
     } else {
         dwg_maintenance_version(version)
@@ -199,7 +205,7 @@ mod tests {
     #[test]
     fn test_write_aux_header_starts_with_magic() {
         let header = HeaderVariables::default();
-        let data = write_aux_header(DxfVersion::AC1015, &header);
+        let data = write_aux_header(DxfVersion::AC1015, 0, &header);
 
         // Should start with 0xFF, 0x77, 0x01
         assert_eq!(data[0], 0xFF);
@@ -210,7 +216,7 @@ mod tests {
     #[test]
     fn test_write_aux_header_contains_version() {
         let header = HeaderVariables::default();
-        let data = write_aux_header(DxfVersion::AC1015, &header);
+        let data = write_aux_header(DxfVersion::AC1015, 0, &header);
 
         // Version 23 (AC1015) as LE i16 at offset 3
         assert_eq!(data[3], 23);
@@ -220,8 +226,8 @@ mod tests {
     #[test]
     fn test_write_aux_header_r2018_longer() {
         let header = HeaderVariables::default();
-        let data_2000 = write_aux_header(DxfVersion::AC1015, &header);
-        let data_2018 = write_aux_header(DxfVersion::AC1032, &header);
+        let data_2000 = write_aux_header(DxfVersion::AC1015, 0, &header);
+        let data_2018 = write_aux_header(DxfVersion::AC1032, 0, &header);
 
         // R2018 should be 6 bytes longer (3 extra RS fields)
         assert_eq!(data_2018.len(), data_2000.len() + 6);

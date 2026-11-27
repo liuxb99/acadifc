@@ -315,6 +315,9 @@ impl DwgDocumentBuilder {
 
     #[inline]
     fn report_progress(&self, value: u16) {
+        if std::env::var_os("ACAD_READ_TRACE").is_some() {
+            eprintln!("[build] progress {}", value.min(1000));
+        }
         if let Some(progress) = &self.progress {
             progress(value.min(1000));
         }
@@ -335,7 +338,9 @@ impl DwgDocumentBuilder {
             .set_handle(document.header.vpent_hdr_control_handle);
         document.vx_table.clear();
         document.vx_control_entries.clear();
+        if std::env::var_os("ACAD_READ_TRACE").is_some() { eprintln!("[build] before handles()"); }
         let mut handles = self.obj_reader.handles();
+        if std::env::var_os("ACAD_READ_TRACE").is_some() { eprintln!("[build] handles={}", handles.len()); }
         // Sort handles numerically so that entity records are processed in
         // allocation order.  This ensures polyline vertex records are
         // encountered in the correct sequence (the writer allocates
@@ -350,7 +355,9 @@ impl DwgDocumentBuilder {
         // The DWG binary uses class numbers (500+) for object types defined in
         // the CLASSES section.  We translate these to our internal OBJ_*
         // constants so the match statements work correctly.
+        if std::env::var_os("ACAD_READ_TRACE").is_some() { eprintln!("[build] before class map"); }
         let class_map = Self::build_class_type_map(document);
+        if std::env::var_os("ACAD_READ_TRACE").is_some() { eprintln!("[build] class map done {}", class_map.len()); }
 
         // Build a set of class numbers that represent graphical entities
         // (as opposed to non-entity objects).  Used in Pass 2 to correctly
@@ -412,7 +419,12 @@ impl DwgDocumentBuilder {
         // handle from the handle map and classify the reason for any gap.
         let mut record_catalog: Vec<(u64, usize, i16, i16)> = Vec::with_capacity(handles.len());
         let mut unreadable_handles: Vec<crate::document::UnreadableHandle> = Vec::new();
+        let mut catalog_seen = 0usize;
         for &handle in &handles {
+            catalog_seen += 1;
+            if catalog_seen % 500 == 0 && std::env::var_os("ACAD_READ_TRACE").is_some() {
+                eprintln!("[build] catalog {catalog_seen}/{}", handles.len());
+            }
             let offset = match self.obj_reader.offset_for(handle) {
                 Some(offset) if offset >= 0 => offset as usize,
                 Some(offset) => {
@@ -458,7 +470,12 @@ impl DwgDocumentBuilder {
         let mut read_failures: Vec<crate::document::RecordReadFailure> = Vec::new();
         let mut table_raw_records: HashMap<Handle, crate::document::RawObjectRecord> =
             HashMap::new();
+        let mut pass1_seen = 0usize;
         for &(handle, offset, raw_type_code, type_code) in &record_catalog {
+            pass1_seen += 1;
+            if pass1_seen % 500 == 0 && std::env::var_os("ACAD_READ_TRACE").is_some() {
+                eprintln!("[build] pass1 {pass1_seen}/{}", record_catalog.len());
+            }
             if is_table_type(type_code) {
                 let (_, mut reader) = match self.obj_reader.read_record_at(offset) {
                     Ok(record) => {
@@ -1360,7 +1377,13 @@ impl DwgDocumentBuilder {
         let pass2_total = pass2_records.len().max(1);
         let mut pass2_done = 0usize;
         let mut records_read = 0usize;
+        let mut batch_index = 0usize;
         for batch in pass2_records.chunks(batch_size) {
+            batch_index += 1;
+            if std::env::var_os("ACAD_READ_TRACE").is_some() {
+                eprintln!("[pass2] batch {batch_index} len={} first={:X}",
+                    batch.len(), batch[0].0);
+            }
             let decode_started = web_time::Instant::now();
             let chunks: Vec<Pass2Chunk> =
                 map_chunks(batch, chunk_size, |records| {
@@ -1370,7 +1393,31 @@ impl DwgDocumentBuilder {
                         paper_space_block_handle,
                         records.len(),
                     );
+                    let chunk_started = web_time::Instant::now();
+                    let decode_budget = std::env::var("ACAD_DECODE_BUDGET_SECS")
+                        .ok()
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(60.0);
                     for &(handle, offset, raw_type_code, type_code) in records {
+                        if chunk_started.elapsed().as_secs_f64() > decode_budget {
+                            chunk.output.read_failures.push(
+                                crate::document::RecordReadFailure {
+                                    handle,
+                                    offset: offset as i64,
+                                    raw_type_code,
+                                    reason: format!(
+                                        "decode budget {decode_budget:.0}s exceeded; \
+                                         refusing to spin on corrupt data"
+                                    ),
+                                },
+                            );
+                            break;
+                        }
+                        let trace = std::env::var_os("ACAD_READ_TRACE").is_some();
+                        if trace {
+                            eprintln!("[pass2] start tid={:?} handle={handle:X} type={type_code}",
+                                std::thread::current().id());
+                        }
                         let (_, reader) = match self.obj_reader.read_record_at(offset) {
                             Ok(record) => {
                                 chunk.output.records_read += 1;
@@ -1403,6 +1450,10 @@ impl DwgDocumentBuilder {
                                     &class_names,
                                     photometric_lighting,
                                 );
+                                if std::env::var_os("ACAD_READ_TRACE").is_some() {
+                                    eprintln!("[pass2] done tid={:?} handle={handle:X} type={type_code}",
+                                        std::thread::current().id());
+                                }
                             }));
                         if result.is_err() {
                             chunk.failures.push((handle, type_code));
@@ -1412,6 +1463,10 @@ impl DwgDocumentBuilder {
                 });
             decode_seconds += decode_started.elapsed().as_secs_f64();
 
+            if std::env::var_os("ACAD_READ_TRACE").is_some() {
+                eprintln!("[pass2] batch {batch_index} decoded in {:.3}s",
+                    decode_started.elapsed().as_secs_f64());
+            }
             let commit_started = web_time::Instant::now();
             for mut chunk in chunks {
                 document

@@ -758,6 +758,10 @@ impl<R: Read + Seek> DwgReader<R> {
 
     #[inline]
     fn report_progress(&self, value: u16) {
+        // Diagnostic breadcrumb for hang localization (fuzzing).
+        if std::env::var_os("ACAD_READ_TRACE").is_some() {
+            eprintln!("[read] stage {}", value.min(1000));
+        }
         if let Some(progress) = &self.progress {
             progress(value.min(1000));
         }

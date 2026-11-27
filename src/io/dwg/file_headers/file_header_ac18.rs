@@ -126,6 +126,18 @@ impl DwgFileHeaderWriterAC18 {
 
     /// Preserve the source file's "app which stored it" header bytes.
     pub fn set_app_version_bytes(&mut self, version: Option<u8>, maintenance: Option<u8>) {
+        if !crate::io::dwg::p14_fix_enabled("app_version_bytes") {
+            // Diagnostic baseline: pre-fix code wrote the release byte it
+            // guessed (0x21) plus a zero maintenance byte.
+            let release = if crate::io::dwg::p14_fix_enabled("release_byte") {
+                self.dwg_version_byte()
+            } else {
+                0x21
+            };
+            self.app_version_byte = Some(release);
+            self.app_maintenance_byte = Some(0);
+            return;
+        }
         self.app_version_byte = version;
         self.app_maintenance_byte = maintenance;
     }
@@ -136,6 +148,10 @@ impl DwgFileHeaderWriterAC18 {
     /// dispatches its object-layout parser on it. Writing 0x21 (R2018) into an
     /// AC1018 file made AutoCAD 2006 parse R2018 object layout and crash.
     fn dwg_version_byte(&self) -> u8 {
+        // Diagnostic: pre-Phase-14 code wrote 0x21 for every version.
+        if !crate::io::dwg::p14_fix_enabled("release_byte") {
+            return 0x21;
+        }
         match self.version {
             DxfVersion::AC1012 => 0x13,
             DxfVersion::AC1014 => 0x15,
