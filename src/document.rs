@@ -1068,7 +1068,24 @@ pub struct CadDocument {
     /// For AC1024 (R2010), maintenance > 3 triggers an extra 4-byte RL field
     /// in the Classes and Header sections.  Preserved during roundtrip.
     pub maintenance_version: u8,
-    
+
+    /// Raw DWG "app which stored it" version byte (file-header 0x11) and its
+    /// maintenance byte (0x12), preserved verbatim.
+    ///
+    /// These are *not* the format version: AutoCAD records the release of the
+    /// program that saved the file (e.g. 0x19 for 2004-2006 apps, 0x1F for
+    /// 2013) even when saving to an older format. Rewriting them to a guessed
+    /// value makes strict consumers (AutoCAD) mis-dispatch.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub app_version_byte: Option<u8>,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub app_maintenance_byte: Option<u8>,
+
+    /// Raw DWG codepage id from the file header (0x13), preserved verbatim so
+    /// e.g. ANSI_950 stays 41 instead of being re-derived from a name table.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub dwg_code_page_index: Option<u16>,
+
     /// Header variables containing drawing settings
     pub header: HeaderVariables,
     
@@ -1392,6 +1409,9 @@ impl CadDocument {
         let mut doc = CadDocument {
             version: DxfVersion::AC1032, // DXF 2018
             maintenance_version: 0,
+            app_version_byte: None,
+            app_maintenance_byte: None,
+            dwg_code_page_index: None,
             header: HeaderVariables::default(),
             layers: Table::new(),
             line_types: Table::new(),

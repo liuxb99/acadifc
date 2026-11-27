@@ -51,6 +51,10 @@ pub struct DwgFileHeaderWriterAC18 {
     version: DxfVersion,
     /// AutoCAD maintenance release version (preserved from source file).
     maintenance_version: u8,
+    /// Raw "app which stored it" version byte (file-header 0x11), when known.
+    app_version_byte: Option<u8>,
+    /// Raw app maintenance byte (file-header 0x12), when known.
+    app_maintenance_byte: Option<u8>,
     /// Compact DWG code-page index.
     code_page: u16,
     /// Section descriptors, keyed by section name.
@@ -97,6 +101,8 @@ impl DwgFileHeaderWriterAC18 {
         Ok(Self {
             version,
             maintenance_version,
+            app_version_byte: None,
+            app_maintenance_byte: None,
             code_page: 30,
             descriptors: IndexMap::new(),
             local_section_maps: Vec::new(),
@@ -116,6 +122,31 @@ impl DwgFileHeaderWriterAC18 {
 
     pub fn set_code_page(&mut self, code_page: u16) {
         self.code_page = code_page;
+    }
+
+    /// Preserve the source file's "app which stored it" header bytes.
+    pub fn set_app_version_bytes(&mut self, version: Option<u8>, maintenance: Option<u8>) {
+        self.app_version_byte = version;
+        self.app_maintenance_byte = maintenance;
+    }
+
+    /// The DWG release byte stored at file-header offset 0x11.
+    ///
+    /// This is *not* a format detail the writer may pick freely: AutoCAD
+    /// dispatches its object-layout parser on it. Writing 0x21 (R2018) into an
+    /// AC1018 file made AutoCAD 2006 parse R2018 object layout and crash.
+    fn dwg_version_byte(&self) -> u8 {
+        match self.version {
+            DxfVersion::AC1012 => 0x13,
+            DxfVersion::AC1014 => 0x15,
+            DxfVersion::AC1015 => 0x17,
+            DxfVersion::AC1018 => 0x19,
+            DxfVersion::AC1021 => 0x1B,
+            DxfVersion::AC1024 => 0x1D,
+            DxfVersion::AC1027 => 0x1F,
+            DxfVersion::AC1032 => 0x21,
+            DxfVersion::Unknown => 0x19,
+        }
     }
 
     /// Get the file offset where the AcDbObjects section starts.
@@ -477,20 +508,22 @@ impl DwgFileHeaderWriterAC18 {
             .map_or(0u32, |s| (s.seeker as u32) + 0x20);
         output.write_u32::<LittleEndian>(preview_addr)?;
 
-        // 0x11: DWG version byte (0x21 for AC1021, 0x21 for AC1024+)
-        // The ODA spec shows different values per version, but many real-world
-        // files (including our reference General.dwg) use 0x21 for AC1024.
-        // We preserve the original file's value via maintenance_version context.
-        output.write_all(&[33u8])?;
-
-        // 0x12: Maintenance release version (app)
-        output.write_all(&[self.maintenance_version])?;
+        // 0x11/0x12: "version of the app which stored the file" and its
+        // maintenance byte. AutoCAD records its own release here even when
+        // saving an older format, so preserve the source values; only fresh
+        // documents use the target format's release byte.
+        let app_version = self.app_version_byte.unwrap_or_else(|| self.dwg_version_byte());
+        let app_maintenance = self.app_maintenance_byte.unwrap_or(self.maintenance_version);
+        output.write_all(&[app_version])?;
+        output.write_all(&[app_maintenance])?;
 
         // 0x13: Codepage (2 bytes)
         output.write_u16::<LittleEndian>(self.code_page)?;
 
-        // 0x15: 3 zero bytes
-        output.write_all(&[0u8; 3])?;
+        // 0x15: unknown_0 (1 byte) + app_dwg_version + app_maint_version
+        output.write_all(&[0u8])?;
+        output.write_all(&[app_version])?;
+        output.write_all(&[app_maintenance])?;
 
         // 0x18: SecurityType (4 bytes)
         output.write_i32::<LittleEndian>(0)?;

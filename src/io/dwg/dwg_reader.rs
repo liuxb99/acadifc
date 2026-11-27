@@ -809,6 +809,12 @@ impl<R: Read + Seek> DwgReader<R> {
         let mut document = crate::document::CadDocument::with_version(dxf_version);
         document.maintenance_version = info.acad_maintenance_version;
         document.dwg_source_version = Some(dxf_version);
+        // Preserve the raw "app which stored it" bytes and codepage id. They
+        // are part of the file header, not derived data: rewriting them from a
+        // guess makes strict consumers (AutoCAD) mis-dispatch.
+        document.app_version_byte = Some(info.dwg_version);
+        document.app_maintenance_byte = Some(info.app_release_version);
+        document.dwg_code_page_index = Some(info.code_page);
 
         // 2. Read Classes (AcDb:Classes)
         if let Ok(classes_buf) = self.get_section_buffer("AcDb:Classes", &info) {

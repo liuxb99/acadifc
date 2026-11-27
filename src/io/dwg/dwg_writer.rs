@@ -548,13 +548,20 @@ fn write_ac18<W: Write + Seek>(
     // which for R2013 (AC1027) omits that RL and makes the header string
     // stream unreadable in AutoCAD/TrueView. Use the canonical per-version
     // value so R2013 files are always well-formed.
-    let maint = aux_header_writer::dwg_maintenance_version(version) as u8;
+    // Preserve the source maintenance release; only fresh documents fall back
+    // to the canonical per-version value.
+    let maint = if document.maintenance_version != 0 {
+        document.maintenance_version
+    } else {
+        aux_header_writer::dwg_maintenance_version(version) as u8
+    };
 
     // AC18 writer reserves 0x100 bytes at file start for metadata
     let mut fhw = DwgFileHeaderWriterAC18::new(version, maint, output)?;
-    fhw.set_code_page(
-        crate::io::dxf::code_page::dwg_code_page_index(&document.header.code_page),
-    );
+    fhw.set_app_version_bytes(document.app_version_byte, document.app_maintenance_byte);
+    fhw.set_code_page(document.dwg_code_page_index.unwrap_or_else(|| {
+        crate::io::dxf::code_page::dwg_code_page_index(&document.header.code_page)
+    }));
 
     // R2004+ default page size for most sections
     const PAGE_SIZE: usize = 0x7400;
