@@ -18,6 +18,14 @@ use encoding_rs::Encoding;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+/// Number of UTF-8-in-legacy-field repairs performed (evidence for reporters).
+pub static REPAIR_LOG: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Reset and read the repair counter (writer reports this per save).
+pub fn take_repair_count() -> usize {
+    REPAIR_LOG.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// First code point of the private-use marker pair.
 const MARKER_BASE: u32 = 0xE000;
 const MARKER: char = '\u{E000}';
@@ -67,15 +75,17 @@ pub(crate) fn repair_utf8_mojibake(encoding: &'static Encoding, text: &str) -> O
 pub(crate) fn decode_legacy_text(encoding: &'static Encoding, bytes: &[u8]) -> String {
     let (decoded, _, had_errors) = encoding.decode(bytes);
     let decoded = decoded.replace('\0', "");
-    if !had_errors {
-        // Repair UTF-8 written into a single-byte field by older tools (see
-        // `repair_utf8_mojibake`): preferred over keeping mojibake, which makes
-        // AutoCAD 2006 abort while loading the substituted font.
-        if let Some(utf8) = std::str::from_utf8(bytes).ok().filter(|s| !s.is_ascii()) {
-            if has_cjk(utf8) && !has_cjk(&decoded) {
-                return decode_unicode_escapes(utf8);
-            }
+    // Phase 17 evidence rule: repair only when the raw bytes are themselves
+    // valid UTF-8 and decoding them with the DWG code page produced different
+    // text. The original bytes are recoverable (round trip), the repair is
+    // logged, and pure-ASCII / valid code-page strings are never touched.
+    if let Ok(utf8) = std::str::from_utf8(bytes) {
+        if !utf8.is_ascii() && utf8 != decoded {
+            REPAIR_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return decode_unicode_escapes(utf8);
         }
+    }
+    if !had_errors {
         return decode_unicode_escapes(&decoded);
     }
 
@@ -363,5 +373,38 @@ mod unicode_escape_tests {
         assert_eq!(text, "中心線");
         let encoded = encode_legacy_text(encoding_rs::BIG5, &text);
         assert_eq!(encoded, native.as_ref());
+    }
+}
+
+
+#[cfg(test)]
+mod phase17_tests {
+    use super::*;
+
+    #[test]
+    fn valid_cp950_string_is_never_touched() {
+        let bytes = "測試".as_bytes().to_vec();
+        let big5 = encoding_rs::BIG5.encode("測試").0.into_owned();
+        let text = decode_legacy_text(encoding_rs::BIG5, &big5);
+        assert_eq!(text, "測試");
+        assert!(std::str::from_utf8(&big5).is_err() || bytes != big5);
+    }
+
+    #[test]
+    fn utf8_in_legacy_field_is_repaired_with_evidence() {
+        // A legacy build wrote UTF-8; decoding with CP1252 must have errors,
+        // so the reversible UTF-8 repair applies.
+        let original = decode_legacy_text(encoding_rs::BIG5, "測試.shx".as_bytes());
+        assert_eq!(original, "測試.shx");
+        let repaired = decode_legacy_text(encoding_rs::WINDOWS_1252, "測試.shx".as_bytes());
+        assert_eq!(repaired, "測試.shx");
+    }
+
+    #[test]
+    fn repair_counter_is_exposed() {
+        let _ = take_repair_count();
+        let utf8 = "測試".as_bytes();
+        let _ = decode_legacy_text(encoding_rs::WINDOWS_1252, utf8);
+        assert!(take_repair_count() >= 1);
     }
 }

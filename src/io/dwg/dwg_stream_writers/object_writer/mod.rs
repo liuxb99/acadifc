@@ -93,6 +93,9 @@ pub struct DwgObjectWriter<'a> {
     pub(super) next_alloc_handle: u64,
     /// Computed model space extents for VPort view adjustment and header EXTMIN/EXTMAX
     pub(crate) model_space_extents: Option<BoundingBox3D>,
+    /// Phase 17: one encoding context for the whole write (source/target
+    /// encoding, DWG code page id, file version).
+    pub(super) encoding_ctx: std::sync::Arc<crate::io::dxf::code_page::EncodingContext>,
     /// SAB data entries collected during entity writing (AC1027+).
     /// Each entry is (entity_handle, sab_binary_data).
     pub(super) sab_entries: Vec<(Handle, Vec<u8>)>,
@@ -173,6 +176,47 @@ fn p16_category_of(type_code: i16) -> &'static str {
     }
 }
 
+/// Phase 17: SHX and Big Font are different contracts. Never substitute a
+/// normal SHX for a Big Font, and never rewrite a legal name — only reject
+/// names that cannot be represented in the target code page, with the object
+/// handle and reason reported to the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FontKind { Shx, BigFont }
+
+pub(crate) fn validate_font_name(
+    name: &str,
+    encoding: &'static encoding_rs::Encoding,
+    kind: FontKind,
+) -> Result<String, String> {
+    if name.is_empty() {
+        return Ok(String::new());
+    }
+    if name.contains("\\U+") {
+        return Err(format!(
+            "font name {name:?} contains a literal AutoCAD escape (never a real file name)"
+        ));
+    }
+    let mut bad = Vec::new();
+    for ch in name.chars() {
+        let mut buf = [0u8; 8];
+        let one = ch.encode_utf8(&mut buf);
+        let (_, _, unencodable) = encoding.encode(one);
+        if unencodable || ch == '\u{FFFD}' {
+            bad.push(ch);
+        }
+    }
+    if bad.is_empty() {
+        Ok(name.to_string())
+    } else {
+        let kind = match kind { FontKind::Shx => "SHX", FontKind::BigFont => "BigFont" };
+        Err(format!(
+            "{kind} name {name:?} is not encodable in the target code page ({} character(s)); refusing to substitute",
+            bad.len()
+        ))
+    }
+}
+
+// Kept for the Phase 16 unit tests; superseded by validate_font_name.
 fn sanitize_legacy_font_name(
     name: &str,
     encoding: &'static encoding_rs::Encoding,
@@ -244,6 +288,23 @@ impl<'a> DwgObjectWriter<'a> {
                 return None;
             }
         }
+        // Phase 17: when source and target code pages differ, a verbatim
+        // replay would carry source bytes into the target file. Re-encode
+        // every string-bearing category instead.
+        if self.encoding_ctx.transcoding {
+            let type_code = self
+                .document
+                .raw_object_records
+                .get(&handle)
+                .map(|record| record.type_code)
+                .unwrap_or(0);
+            if matches!(
+                p16_category_of(type_code),
+                "names" | "styles" | "text" | "dims"
+            ) {
+                return None;
+            }
+        }
         // A replayed STYLE record keeps its original bytes, so a corrupted
         // font name would survive a no-op save and still crash AutoCAD. Force
         // such styles through the semantic writer so the name is sanitized.
@@ -272,12 +333,20 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// Create a new object writer for the given document and version.
     pub fn new(document: &'a CadDocument) -> crate::error::Result<Self> {
+        let ctx = std::sync::Arc::new(
+            crate::io::dxf::code_page::EncodingContext::new(document),
+        );
+        Self::new_with_context(document, ctx)
+    }
+
+    /// Construct with an encoding context computed once by the caller.
+    pub fn new_with_context(
+        document: &'a CadDocument,
+        encoding_ctx: std::sync::Arc<crate::io::dxf::code_page::EncodingContext>,
+    ) -> crate::error::Result<Self> {
         let version = DwgVersion::from_dxf_version(document.version)?;
         let dxf_version = document.version;
-        let (effective_cp_name, _) = crate::io::dxf::code_page::effective_code_page(document);
-        let encoding =
-            crate::io::dxf::code_page::encoding_from_code_page(&effective_cp_name)
-                .unwrap_or(encoding_rs::WINDOWS_1252);
+        let encoding = encoding_ctx.target_encoding;
         let writer = DwgMergedWriter::with_encoding(version, dxf_version, encoding);
 
         // Compute safe starting handle for allocation.
@@ -373,6 +442,7 @@ impl<'a> DwgObjectWriter<'a> {
             owner_overrides: std::collections::HashMap::new(),
             linetype_handles: std::collections::HashMap::new(),
             fidelity_errors: Vec::new(),
+            encoding_ctx,
             plan: std::sync::Arc::new(
                 crate::io::dwg::raw_passthrough::WriterPlan::default(),
             ),
@@ -1082,22 +1152,30 @@ impl<'a> DwgObjectWriter<'a> {
         // Last height (must be > 0; use effective_last_height)
         self.writer.write_bit_double(style.effective_last_height());
         // Font name
-        let (effective_cp_name, _) =
-            crate::io::dxf::code_page::effective_code_page(self.document);
-        let font_encoding = crate::io::dxf::code_page::encoding_from_code_page(
-            &effective_cp_name,
-        )
-        .unwrap_or(encoding_rs::WINDOWS_1252);
+        let font_encoding = self.encoding_ctx.target_encoding;
         if self.dxf_version <= crate::types::DxfVersion::AC1018 {
-            self.writer.write_variable_text(&sanitize_legacy_font_name(
-                &style.font_file,
-                font_encoding,
-            ));
-            // Big font name
-            self.writer.write_variable_text(&sanitize_legacy_font_name(
-                &style.big_font_file,
-                font_encoding,
-            ));
+            let font = match validate_font_name(&style.font_file, font_encoding, FontKind::Shx) {
+                Ok(name) => name,
+                Err(reason) => {
+                    self.fidelity_errors.push(format!(
+                        "STYLE handle {:#X} cannot be written: SHX {reason}",
+                        style.handle.value()
+                    ));
+                    String::new()
+                }
+            };
+            let big = match validate_font_name(&style.big_font_file, font_encoding, FontKind::BigFont) {
+                Ok(name) => name,
+                Err(reason) => {
+                    self.fidelity_errors.push(format!(
+                        "STYLE handle {:#X} cannot be written: BigFont {reason}",
+                        style.handle.value()
+                    ));
+                    String::new()
+                }
+            };
+            self.writer.write_variable_text(&font);
+            self.writer.write_variable_text(&big);
         } else {
             self.writer.write_variable_text(&style.font_file);
             self.writer.write_variable_text(&style.big_font_file);
@@ -2279,11 +2357,7 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn serialize_parallel_entity_batch(&self, handles: &[Handle]) -> ParallelEntityBatch {
-        let (effective_cp_name, _) =
-            crate::io::dxf::code_page::effective_code_page(self.document);
-        let encoding =
-            crate::io::dxf::code_page::encoding_from_code_page(&effective_cp_name)
-                .unwrap_or(encoding_rs::WINDOWS_1252);
+        let encoding = self.encoding_ctx.target_encoding;
         let mut worker = Self {
             version: self.version,
             dxf_version: self.dxf_version,
@@ -2307,6 +2381,7 @@ impl<'a> DwgObjectWriter<'a> {
             owner_overrides: std::collections::HashMap::new(),
             linetype_handles: std::collections::HashMap::new(),
             fidelity_errors: Vec::new(),
+            encoding_ctx: std::sync::Arc::clone(&self.encoding_ctx),
             plan: std::sync::Arc::clone(&self.plan),
             omitted_objects: Vec::new(),
             replayed_records: 0,
@@ -2803,20 +2878,28 @@ mod p15_font_tests {
     }
 
     #[test]
-    fn latin1_mojibake_becomes_safe_substitute() {
-        // Bytes an older build left behind when it wrote UTF-8 into a
-        // single-byte field; AutoCAD 2006 aborts in SHLOAD on these.
+    fn unencodable_font_name_is_rejected_not_substituted() {
+        // Phase 17: no silent txt.shx / BigFont substitution. Unencodable
+        // names are reported so the writer can block the output.
         let enc = encoding_rs::BIG5;
-        assert_eq!(
-            sanitize_legacy_font_name("ï¿½Ø±dï¿½Ê.shx", enc),
-            "txt.shx"
-        );
-        assert_eq!(sanitize_legacy_font_name(r"\U+00EF\U+00BF.shx", enc), "txt.shx");
+        assert!(super::validate_font_name("ï¿½Ø±d.shx", enc, super::FontKind::Shx).is_err());
+        assert!(super::validate_font_name(r"\U+00EF.shx", enc, super::FontKind::BigFont).is_err());
     }
 
     #[test]
-    fn cjk_font_name_is_kept_when_encodable() {
+    fn legal_names_survive_including_paths_and_cjk() {
         let enc = encoding_rs::BIG5;
-        assert_eq!(sanitize_legacy_font_name("華康.shx", enc), "華康.shx");
+        assert_eq!(
+            super::validate_font_name("華康.shx", enc, super::FontKind::Shx).unwrap(),
+            "華康.shx"
+        );
+        assert_eq!(
+            super::validate_font_name(r"C:\WESTV9\SUPPORT\STMEAS1.SHX", enc, super::FontKind::Shx).unwrap(),
+            r"C:\WESTV9\SUPPORT\STMEAS1.SHX"
+        );
+        assert_eq!(
+            super::validate_font_name("bigfont.shx", enc, super::FontKind::BigFont).unwrap(),
+            "bigfont.shx"
+        );
     }
 }

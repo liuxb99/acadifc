@@ -281,3 +281,53 @@ mod tests {
         assert_eq!(encoding_from_code_page("KOREAN"), Some(encoding_rs::EUC_KR));
     }
 }
+
+
+/// Single source of truth for every string conversion in one write.
+///
+/// Phase 17 review: the writer used to recompute the "effective" code page in
+/// the file header, the header section, the classes section and the object
+/// writer.  A single context makes the source encoding, target encoding, DWG
+/// code page id and file version explicit and impossible to disagree.
+#[derive(Debug, Clone)]
+pub struct EncodingContext {
+    /// DXF version being written (AC1015/AC1018/...).
+    pub version: crate::types::DxfVersion,
+    /// DWG code page id stored at file-header 0x13.
+    pub codepage_id: u16,
+    /// Code page name used for diagnostics.
+    pub codepage_name: String,
+    /// Encoding the source drawing was decoded with (None for new documents).
+    pub source_encoding: Option<&'static encoding_rs::Encoding>,
+    /// Encoding every legacy string must be written with.
+    pub target_encoding: &'static encoding_rs::Encoding,
+    /// True when source and target code page differ, so raw replay of any
+    /// string-bearing record is unsafe (it would carry source bytes).
+    pub transcoding: bool,
+    /// Source DWG code page id (0 when unknown/new document).
+    pub source_codepage_id: u16,
+}
+
+impl EncodingContext {
+    pub fn new(document: &crate::document::CadDocument) -> Self {
+        let (name, id) = effective_code_page(document);
+        let source_id = document.dwg_code_page_index.unwrap_or(0);
+        let source_encoding = if source_id != 0 {
+            encoding_from_code_page(&crate::io::dxf::code_page::dwg_code_page_name(source_id))
+        } else {
+            encoding_from_code_page(&document.header.code_page)
+        };
+        let target_encoding = encoding_from_code_page(&name)
+            .unwrap_or(encoding_rs::WINDOWS_1252);
+        let transcoding = source_id != 0 && source_id != id;
+        Self {
+            version: document.version,
+            codepage_id: id,
+            codepage_name: name,
+            source_encoding,
+            target_encoding,
+            transcoding,
+            source_codepage_id: source_id,
+        }
+    }
+}

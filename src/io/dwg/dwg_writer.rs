@@ -457,13 +457,19 @@ fn write_ac15<W: Write + Seek>(
 ) -> Result<()> {
     let mut fhw = DwgFileHeaderWriterAC15::new(version);
     fhw.set_maintenance_version(document.maintenance_version);
-    let (effective_cp_name, effective_cp_index) =
-        crate::io::dxf::code_page::effective_code_page(document);
+    let encoding_ctx = std::sync::Arc::new(
+        crate::io::dxf::code_page::EncodingContext::new(document),
+    );
+    let effective_cp_name = encoding_ctx.codepage_name.clone();
+    let effective_cp_index = encoding_ctx.codepage_id;
     fhw.set_code_page(effective_cp_index);
 
     // ── Phase 1: Compute objects FIRST to get handle map ──
     let objects_started = web_time::Instant::now();
-    let obj_writer = DwgObjectWriter::new(document)?;
+    let obj_writer = DwgObjectWriter::new_with_context(
+        document,
+        std::sync::Arc::clone(&encoding_ctx),
+    )?;
     let (obj_data, handle_map_u32, extents, _sab_entries, fidelity_errors, writer_report) =
         obj_writer.write();
     reject_fidelity_errors(fidelity_errors)?;
@@ -491,9 +497,7 @@ fn write_ac15<W: Write + Seek>(
     } else {
         aux_header_writer::dwg_maintenance_version(version) as u8
     };
-    let header_encoding =
-        crate::io::dxf::code_page::encoding_from_code_page(&effective_cp_name)
-            .unwrap_or(encoding_rs::WINDOWS_1252);
+    let header_encoding = encoding_ctx.target_encoding;
     let header_data = header_writer::write_header_with_encoding(
         version,
         &corrected_header,
@@ -583,18 +587,12 @@ fn write_ac18<W: Write + Seek>(
     if document.dwg_source_version == Some(version) {
         fhw.set_app_version_bytes(document.app_version_byte, document.app_maintenance_byte);
     }
-    let (effective_cp_name, effective_cp_index) =
-        crate::io::dxf::code_page::effective_code_page(document);
-    let code_page = if crate::io::dwg::p14_fix_enabled("codepage") {
-        if document.dwg_code_page_index.is_some() {
-            effective_cp_index
-        } else {
-            crate::io::dxf::code_page::dwg_code_page_index(&effective_cp_name)
-        }
-    } else {
-        crate::io::dxf::code_page::dwg_code_page_index(&effective_cp_name)
-    };
-    fhw.set_code_page(code_page);
+    let encoding_ctx = std::sync::Arc::new(
+        crate::io::dxf::code_page::EncodingContext::new(document),
+    );
+    // One decision for the whole file: never recompute the id from the name
+    // (that path reintroduced the DOS-era 24 for "BIG5").
+    fhw.set_code_page(encoding_ctx.codepage_id);
 
     // R2004+ default page size for most sections
     const PAGE_SIZE: usize = 0x7400;
@@ -603,7 +601,10 @@ fn write_ac18<W: Write + Seek>(
 
     // ── Phase 1: Compute objects FIRST to get handle map ──
     let objects_started = web_time::Instant::now();
-    let obj_writer = DwgObjectWriter::new(document)?;
+    let obj_writer = DwgObjectWriter::new_with_context(
+        document,
+        std::sync::Arc::clone(&encoding_ctx),
+    )?;
     let (obj_data, handle_map_u32, extents, sab_entries, fidelity_errors, writer_report) =
         obj_writer.write();
     reject_fidelity_errors(fidelity_errors)?;
@@ -634,9 +635,7 @@ fn write_ac18<W: Write + Seek>(
     };
 
     // ── Section: Header (uses synced + corrected header) ──
-    let header_encoding =
-        crate::io::dxf::code_page::encoding_from_code_page(&effective_cp_name)
-            .unwrap_or(encoding_rs::WINDOWS_1252);
+    let header_encoding = encoding_ctx.target_encoding;
     let header_data = header_writer::write_header_with_encoding(
         version,
         &corrected_header,
@@ -849,8 +848,9 @@ fn write_ac21_impl<W: Write + Seek>(
         aux_header_writer::dwg_maintenance_version(version) as u8
     };
     let header_encoding =
-        crate::io::dxf::code_page::encoding_from_code_page(&effective_cp_name)
-            .unwrap_or(encoding_rs::WINDOWS_1252);
+        crate::io::dxf::code_page::effective_code_page(document);
+    let header_encoding = crate::io::dxf::code_page::encoding_from_code_page(&header_encoding.0)
+        .unwrap_or(encoding_rs::WINDOWS_1252);
     let classes_data = classes_writer::write_classes_with_encoding(
         version,
         &classes,
