@@ -73,6 +73,41 @@ pub(crate) fn repair_utf8_mojibake(encoding: &'static Encoding, text: &str) -> O
 
 /// Decode a legacy DWG string, preserving undecodable bytes reversibly.
 pub(crate) fn decode_legacy_text(encoding: &'static Encoding, bytes: &[u8]) -> String {
+    if encoding != encoding_rs::BIG5 || bytes.len() < 2 {
+        return decode_legacy_text_raw(encoding, bytes);
+    }
+    // WHATWG Big5 and classic CP950 disagree on 264 byte pairs. Split those out
+    // first so our reader produces the same characters AutoCAD/LibreDWG produce.
+    let mut out = String::with_capacity(bytes.len());
+    let mut run: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b >= 0x81 && i + 1 < bytes.len() {
+            if let Some(ch) = crate::io::dwg::cp950_fallback::cp950_char(b, bytes[i + 1]) {
+                if !run.is_empty() {
+                    out.push_str(&decode_legacy_text_raw(encoding, &run));
+                    run.clear();
+                }
+                out.push(ch);
+                i += 2;
+                continue;
+            }
+            run.push(b);
+            run.push(bytes[i + 1]);
+            i += 2;
+            continue;
+        }
+        run.push(b);
+        i += 1;
+    }
+    if !run.is_empty() {
+        out.push_str(&decode_legacy_text_raw(encoding, &run));
+    }
+    out
+}
+
+fn decode_legacy_text_raw(encoding: &'static Encoding, bytes: &[u8]) -> String {
     let (decoded, _, had_errors) = encoding.decode(bytes);
     let decoded = decoded.replace('\0', "");
     // Phase 17 evidence rule: repair only when the raw bytes are themselves
@@ -266,16 +301,15 @@ pub(crate) fn encode_legacy_text(encoding: &'static Encoding, text: &str) -> Vec
                 }
             }
         }
-        if crate::io::dwg::cp950_fallback::prefers_escape(encoding, ch) {
+        if let Some(bytes) = crate::io::dwg::cp950_fallback::cp950_bytes(encoding, ch) {
             // WHATWG Big5 would pick a pair that classic CP950 readers (AutoCAD,
             // LibreDWG) decode differently - e.g. U+0424 -> C8 49 instead of the
-            // CP950 C7 BC - so the character silently disappears there. Emit
-            // AutoCAD's `\U+XXXX` escape instead: it is what AutoCAD writes for
-            // this text, our reader decodes it back, and independent readers do
-            // too. This keeps the source representation of L-09/L-10 intact.
+            // CP950 C7 BC - so the character silently disappears there. Emit the
+            // classic CP950 bytes instead; the decoder below maps them back, and
+            // AutoCAD/LibreDWG decode them as the same character.
             out.extend_from_slice(&encode_plain(encoding, &plain));
             plain.clear();
-            push_escape(&mut out, ch);
+            out.extend_from_slice(&bytes);
             continue;
         }
         if !ch.is_ascii() {
@@ -354,11 +388,27 @@ fn reverse_bytes(encoding: &'static Encoding, ch: char) -> Option<Vec<u8>> {
 fn encode_plain(encoding: &'static Encoding, text: &str) -> Vec<u8> {
     let (encoded, _, had_errors) = encoding.encode(text);
     if !had_errors {
-        return encoded.into_owned();
+        let (plain, _, _) = encoding.encode(text);
+        // fast path only when no character needs the classic CP950 bytes
+        if plain.iter().all(|_| true)
+            && !text
+                .chars()
+                .any(|c| crate::io::dwg::cp950_fallback::cp950_bytes(encoding, c).is_some())
+        {
+            return encoded.into_owned();
+        }
     }
     let mut out = Vec::with_capacity(text.len());
     let mut run = String::with_capacity(text.len());
     for ch in text.chars() {
+        if let Some(bytes) = crate::io::dwg::cp950_fallback::cp950_bytes(encoding, ch) {
+            if !run.is_empty() {
+                out.extend_from_slice(encoding.encode(&run).0.as_ref());
+                run.clear();
+            }
+            out.extend_from_slice(&bytes);
+            continue;
+        }
         let (one, _, err) = encoding.encode(&ch.to_string());
         if !err {
             run.push(ch);
@@ -403,8 +453,13 @@ mod tests {
         // Real drawing L-09/L-10 (AC1015): U+0424 is CP950 C7 BC in the source.
         // encoding_rs (WHATWG Big5) would emit C8 49, which LibreDWG/AutoCAD's
         // CP950 decoder cannot read, making the character disappear.
-        assert_eq!(encode_legacy_text(encoding_rs::BIG5, "Ф"), b"\\U+0424".to_vec());
-        assert_eq!(encode_legacy_text(encoding_rs::BIG5, " Ф"), b" \\U+0424".to_vec());
+        // classic CP950 bytes (source representation for these drawings)
+        assert_eq!(encode_legacy_text(encoding_rs::BIG5, "Ф"), vec![0xC7, 0xBC]);
+        assert_eq!(encode_legacy_text(encoding_rs::BIG5, " Ф"), vec![0x20, 0xC7, 0xBC]);
+        // our reader must decode the classic pair back to the same character that
+        // AutoCAD/LibreDWG see (WHATWG alone would decode it as "ダ")
+        assert_eq!(decode_legacy_text(encoding_rs::BIG5, &[0xC7, 0xBC]), "Ф");
+        // the AutoCAD escape form still decodes
         assert_eq!(decode_legacy_text(encoding_rs::BIG5, b"\\U+0424"), "Ф");
     }
 

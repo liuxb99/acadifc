@@ -279,12 +279,33 @@ static CP950_DIFF: &[(u32, [u8; 2])] = &[
     (0xFF64, [0xA1, 0x4E]), // not-encodable
 ];
 
-/// True when the WHATWG/Big5 encoder would produce bytes that a classic CP950
-/// decoder reads differently. For those characters the encoder emits AutoCAD's
-/// `\U+XXXX` escape instead of the WHATWG pair: the escape is what AutoCAD
-/// itself writes for such text, our own reader decodes it, and classic Big5
-/// readers (LibreDWG) decode it too, so the character cannot silently vanish.
-pub(crate) fn prefers_escape(encoding: &'static Encoding, ch: char) -> bool {
-    encoding == encoding_rs::BIG5
-        && CP950_DIFF.binary_search_by_key(&(ch as u32), |(c, _)| *c).is_ok()
+/// Classic CP950 bytes for `ch` when they differ from the WHATWG pair.
+///
+/// The writer emits these bytes instead of the WHATWG/HKSCS pair: AutoCAD and
+/// other classic Big5 readers decode CP950, so the character survives. Table
+/// entries are exactly the characters where the two encodings disagree.
+pub(crate) fn cp950_bytes(encoding: &'static Encoding, ch: char) -> Option<[u8; 2]> {
+    if encoding != encoding_rs::BIG5 {
+        return None;
+    }
+    CP950_DIFF
+        .binary_search_by_key(&(ch as u32), |(c, _)| *c)
+        .ok()
+        .map(|i| CP950_DIFF[i].1)
+}
+
+/// Decode a byte pair that WHATWG Big5 maps differently from classic CP950.
+/// Used by the legacy decoder so our own reader agrees with AutoCAD/LibreDWG.
+pub(crate) fn cp950_char(a: u8, b: u8) -> Option<char> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    static MAP: OnceLock<HashMap<u16, char>> = OnceLock::new();
+    let map = MAP.get_or_init(|| {
+        let mut m = HashMap::with_capacity(CP950_DIFF.len());
+        for (cp, bytes) in CP950_DIFF {
+            m.insert(((bytes[0] as u16) << 8) | bytes[1] as u16, char::from_u32(*cp).unwrap());
+        }
+        m
+    });
+    map.get(&(((a as u16) << 8) | b as u16)).copied()
 }
