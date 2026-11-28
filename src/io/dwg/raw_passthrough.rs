@@ -419,7 +419,13 @@ fn build_graph(
     let mut graph = DependencyGraph::default();
     let mut issues: Vec<ReferenceIssue> = Vec::new();
     let mut note = |container: &'static str, source: Handle, target: Handle, detail: String| {
-        if index.resolves(target) {
+        // A NULL target is not a reference at all. Real drawings carry
+        // dictionary entries whose value is handle 0 (observed: DICTIONARY
+        // 0xC entry "" -> 0x0 in AC1018 corpus files produced by an older
+        // writer). The entry survives verbatim through replay, so it must
+        // not block passthrough (Phase 13 rule: a reference the SOURCE file
+        // itself already has dangling is not a reason to refuse the write).
+        if target.is_null() || index.resolves(target) {
             return;
         }
         issues.push(ReferenceIssue {

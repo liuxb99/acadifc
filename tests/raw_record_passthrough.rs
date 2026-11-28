@@ -140,3 +140,36 @@ fn transcoded_write_plans_decoded_records_as_rewrite() {
         other => panic!("decoded record must be rewritten on transcode, got {other:?}"),
     }
 }
+
+// Phase 18 regression: a NULL target is not an unresolvable reference.
+// AC1018 corpus files written by an older writer contain DICTIONARY entries
+// with an empty name whose value handle is 0. The write was blocked with
+// "raw passthrough blocked: N unresolvable reference(s)" although the entry is
+// replayed verbatim from the source bytes.
+#[test]
+fn null_target_dictionary_entry_does_not_block_write() {
+    let mut doc = acadrust::CadDocument::new();
+    doc.version = acadrust::types::DxfVersion::AC1018;
+    doc.dwg_source_version = Some(acadrust::types::DxfVersion::AC1018);
+
+    let mut dict = acadrust::objects::Dictionary::new();
+    dict.handle = acadrust::types::Handle::new(0xC);
+    dict.entries
+        .push((String::new(), acadrust::types::Handle::NULL));
+    dict.entries
+        .push(("ACAD_GROUP".to_string(), acadrust::types::Handle::new(0x20)));
+    doc.objects
+        .insert(dict.handle, acadrust::objects::ObjectType::Dictionary(dict));
+
+    let issues = acadrust::io::dwg::raw_passthrough::reference_issues(&doc);
+    assert!(
+        issues.iter().all(|issue| !issue.target.is_null()),
+        "a null target must not be reported as an unresolvable reference: {issues:?}"
+    );
+    let plan = acadrust::io::dwg::raw_passthrough::plan(&doc).expect("plan");
+    assert!(
+        plan.blocked.iter().all(|b| !b.contains("0x0")),
+        "null target must not block the plan: {:?}",
+        plan.blocked
+    );
+}
