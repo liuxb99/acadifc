@@ -257,6 +257,15 @@ impl<'a> DwgObjectWriter<'a> {
     /// and non-graphical objects (Phase 9 P0-4): every record class goes through
     /// the same per-handle decision instead of ad-hoc early returns.
     pub(super) fn try_replay_raw(&mut self, handle: Handle) -> bool {
+        // Phase 18: the plan is authoritative. A record planned as Rewrite must
+        // never be replayed -- in particular a DECODED record in a transcoded
+        // write is planned EncodingChanged so the semantic writer re-encodes its
+        // strings in the target code page. Without this gate the transcoding
+        // guard below fired before the plan was consulted and aborted the save
+        // even for records the writer can re-encode.
+        if !self.plan.is_replay(handle) {
+            return false;
+        }
         // Phase 17 item 1: when source and target code pages differ, an object
         // whose record type has no semantic (string-aware) re-encoder is
         // raw-only: its bytes would carry the source code page into the target

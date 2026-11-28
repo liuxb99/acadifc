@@ -743,6 +743,10 @@ pub enum RewriteReason {
     MissingSourceBytes,
     /// The source version differs from the output version.
     VersionChanged,
+    /// The target drawing code page is a different ENCODING than the source:
+    /// the record must be re-encoded from the semantic model instead of being
+    /// replayed verbatim (Phase 18).
+    EncodingChanged,
     /// No writer path for this object type.
     Unsupported(String),
 }
@@ -757,6 +761,7 @@ impl RewriteReason {
             RewriteReason::NewObject => "new object".into(),
             RewriteReason::MissingSourceBytes => "source bytes missing".into(),
             RewriteReason::VersionChanged => "version changed".into(),
+            RewriteReason::EncodingChanged => "code page encoding changed".into(),
             RewriteReason::Unsupported(what) => format!("unsupported: {what}"),
         }
     }
@@ -972,6 +977,14 @@ pub fn plan(document: &CadDocument) -> std::result::Result<WriterPlan, String> {
             .dwg_source_version
             .map(|v| v == document.version)
             .unwrap_or(false);
+    // Phase 18: when the target code page is a different encoding, verbatim
+    // replay of a DECODED record would carry the source bytes into the target
+    // file. Such records must be planned as a rewrite so the semantic writer
+    // re-encodes every string in the target code page. Only records the reader
+    // could not decode at all stay on the replay path (where the writer fails
+    // closed with an explicit fidelity error).
+    let transcoding =
+        crate::io::dxf::code_page::EncodingContext::new(document).transcoding;
 
     // A source handle the reader could neither decode nor preserve is not a
     // deletion: the save must be blocked with a reproducible reason.
@@ -1001,7 +1014,9 @@ pub fn plan(document: &CadDocument) -> std::result::Result<WriterPlan, String> {
         } else if index.new.contains(&handle) {
             RecordAction::New
         } else if has_raw {
-            if dirty.as_ref().is_some_and(|d| d.contains(&handle)) {
+            if transcoding {
+                RecordAction::Rewrite(RewriteReason::EncodingChanged)
+            } else if dirty.as_ref().is_some_and(|d| d.contains(&handle)) {
                 RecordAction::Rewrite(RewriteReason::Dirty)
             } else {
                 RecordAction::Replay

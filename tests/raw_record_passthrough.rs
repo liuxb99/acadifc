@@ -101,3 +101,42 @@ fn dos_big5_codepage_id_24_is_not_a_transcode() {
     assert_eq!(ctx2.source_codepage_id, 30);
     assert!(ctx2.transcoding, "1252 -> 950 changes bytes and must transcode");
 }
+
+// Phase 18 regression: when a save transcodes to a different legacy encoding,
+// every record the reader DECODED must be planned as a rewrite, not replayed.
+// Before this, the plan still said "Replay" and try_replay_raw's transcode
+// guard aborted the whole save on the first control record
+// ("raw-only object handle=0x1 type=48 cannot be transcoded").
+#[test]
+fn transcoded_write_plans_decoded_records_as_rewrite() {
+    use acadrust::io::dwg::raw_passthrough::{plan, RecordAction, RewriteReason};
+    use acadrust::types::{DxfVersion, Handle};
+
+    let mut doc = acadrust::CadDocument::new();
+    doc.version = DxfVersion::AC1018;
+    doc.dwg_source_version = Some(DxfVersion::AC1018);
+    doc.dwg_code_page_index = Some(30); // ANSI_1252 source
+    doc.header.code_page = "ANSI_1252".to_string();
+
+    // CJK content forces the target code page to ANSI_950 (41) => transcoding.
+    let mut layer = acadrust::tables::Layer::new("縱斷面");
+    layer.handle = Handle::new(0x20);
+    doc.layers.add(layer).unwrap();
+
+    let handle = Handle::new(0x20);
+    doc.raw_object_records.insert(
+        handle,
+        acadrust::document::RawObjectRecord {
+            bytes: vec![0u8; 4],
+            handle_bits: 0,
+            version: DxfVersion::AC1018,
+            type_code: 51, // LAYER: decodable, so it must be re-encoded
+        },
+    );
+
+    let p = plan(&doc).expect("writer plan");
+    match p.action(handle) {
+        Some(RecordAction::Rewrite(RewriteReason::EncodingChanged)) => {}
+        other => panic!("decoded record must be rewritten on transcode, got {other:?}"),
+    }
+}
