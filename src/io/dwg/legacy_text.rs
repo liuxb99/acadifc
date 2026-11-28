@@ -182,6 +182,24 @@ pub(crate) fn encode_legacy_text(encoding: &'static Encoding, text: &str) -> Vec
                 }
             }
         }
+        if crate::io::dwg::cp950_fallback::prefers_escape(encoding, ch) {
+            // WHATWG Big5 would pick a pair that classic CP950 readers (AutoCAD,
+            // LibreDWG) decode differently - e.g. U+0424 -> C8 49 instead of the
+            // CP950 C7 BC - so the character silently disappears there. Emit
+            // AutoCAD's `\U+XXXX` escape instead: it is what AutoCAD writes for
+            // this text, our reader decodes it back, and independent readers do
+            // too. This keeps the source representation of L-09/L-10 intact.
+            out.extend_from_slice(&encode_plain(encoding, &plain));
+            plain.clear();
+            let value = ch as u32;
+            let escape = if value <= 0xFFFF {
+                format!("\\U+{value:04X}")
+            } else {
+                format!("\\U+{value:06X}")
+            };
+            out.extend_from_slice(escape.as_bytes());
+            continue;
+        }
         if !ch.is_ascii() {
             let (_, _, unencodable) = encoding.encode(&ch.to_string());
             if unencodable {
@@ -292,6 +310,16 @@ fn encode_plain(encoding: &'static Encoding, text: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cyrillic_uses_classic_cp950_pair_not_whatwg() {
+        // Real drawing L-09/L-10 (AC1015): U+0424 is CP950 C7 BC in the source.
+        // encoding_rs (WHATWG Big5) would emit C8 49, which LibreDWG/AutoCAD's
+        // CP950 decoder cannot read, making the character disappear.
+        assert_eq!(encode_legacy_text(encoding_rs::BIG5, "Ф"), b"\\U+0424".to_vec());
+        assert_eq!(encode_legacy_text(encoding_rs::BIG5, " Ф"), b" \\U+0424".to_vec());
+        assert_eq!(decode_legacy_text(encoding_rs::BIG5, b"\\U+0424"), "Ф");
+    }
 
     #[test]
     fn undecodable_big5_bytes_round_trip_bit_for_bit() {
