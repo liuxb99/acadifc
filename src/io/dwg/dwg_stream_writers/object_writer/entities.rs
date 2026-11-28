@@ -801,7 +801,7 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_raw_double(e.width_factor);
             }
             // Text value TV 1
-            self.writer.write_variable_text(&e.value);
+            self.writer.write_variable_text_entity(&e.value);
             // Generation BS 71 â€” present if !(DataFlags & 0x20)
             if (data_flags & 0x20) == 0 {
                 self.writer.write_bit_short(e.generation_flags);
@@ -4883,7 +4883,7 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_raw_double(width_factor);
             }
             // Text value TV 1
-            self.writer.write_variable_text(text_value);
+            self.writer.write_variable_text_entity(text_value);
             // Generation BS 71 â€” if !(flags & 0x20)
             if (data_flags & 0x20) == 0 {
                 self.writer.write_bit_short(generation);
