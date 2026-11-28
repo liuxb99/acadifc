@@ -125,43 +125,127 @@ pub(crate) fn decode_legacy_text(encoding: &'static Encoding, bytes: &[u8]) -> S
 /// Older CAD writers store CJK layer/style names this way when the code page
 /// cannot carry them; keeping the literal escape makes AutoCAD display the
 /// escape text instead of the Chinese name.
+///
+/// AutoCAD escapes are exactly FOUR hex digits (a UTF-16 code unit). A
+/// supplementary-plane character is written as two escapes (a surrogate pair).
+/// Parsing more than four digits corrupts text such as
+/// `\U+2013` followed by `2K+780` (the `2` used to be swallowed into
+/// `\U+20132` and became U+20132).
 fn decode_unicode_escapes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch == '\\'
-            && matches!(chars.peek(), Some('U') | Some('u'))
-        {
-            chars.next();
-            if chars.peek() == Some(&'+') {
-                chars.next();
-                let mut hex = String::with_capacity(6);
-                while let Some(&next) = chars.peek() {
-                    if next.is_ascii_hexdigit() && hex.len() < 6 {
-                        hex.push(next);
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-                if hex.len() >= 4 {
-                    if let Ok(value) = u32::from_str_radix(&hex, 16) {
-                        if let Some(decoded) = char::from_u32(value) {
-                            out.push(decoded);
-                            continue;
+        if ch == '\\' {
+            // `chars` points just after the backslash.
+            if matches!(chars.peek(), Some('U') | Some('u')) {
+                if let Some((unit, rest)) = take_escape_after_backslash(&chars) {
+                chars = rest;
+                if (0xD800..=0xDBFF).contains(&unit) {
+                    if let Some((low, rest2)) = take_escape_unit(&chars) {
+                        if (0xDC00..=0xDFFF).contains(&low) && chars.peek() == Some(&'\\') {
+                            let combined = 0x10000
+                                + ((unit - 0xD800) << 10)
+                                + (low - 0xDC00);
+                            if let Some(decoded) = char::from_u32(combined) {
+                                chars = rest2;
+                                out.push(decoded);
+                                continue;
+                            }
                         }
                     }
                 }
-                out.push_str("\\U+");
-                out.push_str(&hex);
+                if let Some(decoded) = char::from_u32(unit) {
+                    out.push(decoded);
+                } else {
+                    out.push_str(&format!("\\U+{unit:04X}"));
+                }
                 continue;
+                }
             }
-            out.push_str("\\U");
+            out.push('\\');
             continue;
         }
         out.push(ch);
     }
     out
+}
+
+/// Like `take_escape_unit` but takes the iterator positioned just AFTER the
+/// opening backslash.
+fn take_escape_after_backslash<'a>(
+    chars: &std::iter::Peekable<std::str::Chars<'a>>,
+) -> Option<(u32, std::iter::Peekable<std::str::Chars<'a>>)> {
+    let mut it = chars.clone();
+    match it.peek() {
+        Some('U') | Some('u') => {
+            it.next();
+        }
+        _ => return None,
+    }
+    if it.peek() != Some(&'+') {
+        return None;
+    }
+    it.next();
+    let mut hex = String::with_capacity(4);
+    for _ in 0..4 {
+        match it.peek() {
+            Some(&c) if c.is_ascii_hexdigit() => {
+                hex.push(c);
+                it.next();
+            }
+            _ => return None,
+        }
+    }
+    u32::from_str_radix(&hex, 16).ok().map(|v| (v, it))
+}
+
+/// Try to read `U+XXXX` (exactly four hex digits) from just after the
+/// backslash. Returns the UTF-16 unit and the iterator positioned after the
+/// escape, or `None` when the text is not a well-formed escape (in which case
+/// the caller keeps the backslash literally).
+fn take_escape_unit<'a>(
+    chars: &std::iter::Peekable<std::str::Chars<'a>>,
+) -> Option<(u32, std::iter::Peekable<std::str::Chars<'a>>)> {
+    let mut it = chars.clone();
+    if it.peek() != Some(&'\\') {
+        return None;
+    }
+    it.next();
+    match it.peek() {
+        Some('U') | Some('u') => {
+            it.next();
+        }
+        _ => return None,
+    }
+    if it.peek() != Some(&'+') {
+        return None;
+    }
+    it.next();
+    let mut hex = String::with_capacity(4);
+    for _ in 0..4 {
+        match it.peek() {
+            Some(&c) if c.is_ascii_hexdigit() => {
+                hex.push(c);
+                it.next();
+            }
+            _ => return None,
+        }
+    }
+    u32::from_str_radix(&hex, 16).ok().map(|v| (v, it))
+}
+
+/// Append one character as AutoCAD `\U+XXXX` escape bytes (surrogate pair for
+/// characters outside the BMP, which is what AutoCAD itself writes).
+fn push_escape(out: &mut Vec<u8>, ch: char) {
+    let value = ch as u32;
+    if value <= 0xFFFF {
+        out.extend_from_slice(format!("\\U+{value:04X}").as_bytes());
+    } else {
+        let v = value - 0x10000;
+        let hi = 0xD800 + (v >> 10);
+        let lo = 0xDC00 + (v & 0x3FF);
+        out.extend_from_slice(format!("\\U+{hi:04X}\\U+{lo:04X}").as_bytes());
+    }
 }
 
 /// Encode a legacy DWG string without `encoding_rs`'s numeric-entity fallback.
@@ -191,13 +275,7 @@ pub(crate) fn encode_legacy_text(encoding: &'static Encoding, text: &str) -> Vec
             // too. This keeps the source representation of L-09/L-10 intact.
             out.extend_from_slice(&encode_plain(encoding, &plain));
             plain.clear();
-            let value = ch as u32;
-            let escape = if value <= 0xFFFF {
-                format!("\\U+{value:04X}")
-            } else {
-                format!("\\U+{value:06X}")
-            };
-            out.extend_from_slice(escape.as_bytes());
+            push_escape(&mut out, ch);
             continue;
         }
         if !ch.is_ascii() {
@@ -211,13 +289,7 @@ pub(crate) fn encode_legacy_text(encoding: &'static Encoding, text: &str) -> Vec
                 }
                 out.extend_from_slice(&encode_plain(encoding, &plain));
                 plain.clear();
-                let value = ch as u32;
-                let escape = if value <= 0xFFFF {
-                    format!("\\U+{value:04X}")
-                } else {
-                    format!("\\U+{value:06X}")
-                };
-                out.extend_from_slice(escape.as_bytes());
+                push_escape(&mut out, ch);
                 continue;
             }
         }
@@ -310,6 +382,21 @@ fn encode_plain(encoding: &'static Encoding, text: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escape_takes_exactly_four_hex_digits() {
+        // Real AC1018 road-plan-2004.dwg: the escaped en dash is immediately
+        // followed by a hex-looking digit ("2" of "2K+780"); eating it produced
+        // U+20132 and corrupted the whole text.
+        assert_eq!(decode_legacy_text(encoding_rs::WINDOWS_1252,
+                   b"1K+080\\U+20132K+780"), "1K+080–2K+780");
+        // well-formed escape still decodes
+        assert_eq!(decode_legacy_text(encoding_rs::WINDOWS_1252, b"\\U+53F0"), "台");
+        // supplementary characters are written as a surrogate pair of escapes
+        assert_eq!(encode_legacy_text(encoding_rs::WINDOWS_1252, "😀"),
+                   b"\\U+D83D\\U+DE00".to_vec());
+        assert_eq!(decode_legacy_text(encoding_rs::WINDOWS_1252, b"\\U+D83D\\U+DE00"), "😀");
+    }
 
     #[test]
     fn cyrillic_uses_classic_cp950_pair_not_whatwg() {
