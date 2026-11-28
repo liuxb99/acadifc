@@ -238,6 +238,10 @@ impl DwgMergedWriter {
         self.main.encode_legacy_text(text)
     }
 
+    pub fn write_variable_text_entity(&mut self, text: &str) {
+        self.main.write_variable_text_entity(text);
+    }
+
     pub fn write_bit_double_with_default(&mut self, def: f64, value: f64) {
         self.main.write_bit_double_with_default(def, value);
     }

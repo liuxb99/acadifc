@@ -51,6 +51,7 @@ pub mod dwg_writer;
 pub mod eed_codec;
 pub(crate) mod embedded_entity;
 pub(crate) mod legacy_text;
+pub(crate) mod cp950_fallback;
 pub mod file_headers;
 mod parallel;
 pub mod preview;

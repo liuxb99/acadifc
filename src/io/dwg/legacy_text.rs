@@ -206,8 +206,27 @@ fn push_escape(out: &mut Vec<u8>, ch: char) {
     }
 }
 
+/// Append one character as AutoCAD `\U+XXXX` escape bytes (surrogate pair for
+/// characters outside the BMP, which is what AutoCAD writes).
+
+/// Prefer AutoCAD's `\U+XXXX` escape for the characters where the WHATWG Big5
+/// encoder would emit bytes that classic CP950 readers decode differently.
+/// Used for ENTITY TEXT only (TEXT/MTEXT/ATTRIB): AutoCAD interprets escapes in
+/// text content, but layer/style/block names must stay in the code page bytes.
+pub(crate) fn encode_legacy_text_entity(encoding: &'static Encoding, text: &str) -> Vec<u8> {
+    encode_legacy_text_mode(encoding, text, true)
+}
+
 /// Encode a legacy DWG string without `encoding_rs`'s numeric-entity fallback.
 pub(crate) fn encode_legacy_text(encoding: &'static Encoding, text: &str) -> Vec<u8> {
+    encode_legacy_text_mode(encoding, text, false)
+}
+
+fn encode_legacy_text_mode(
+    encoding: &'static Encoding,
+    text: &str,
+    escape_whatwg_diff: bool,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len());
     let mut plain = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -223,6 +242,14 @@ pub(crate) fn encode_legacy_text(encoding: &'static Encoding, text: &str) -> Vec
                     continue;
                 }
             }
+        }
+        if escape_whatwg_diff
+            && crate::io::dwg::cp950_fallback::prefers_escape(encoding, ch)
+        {
+            out.extend_from_slice(&encode_plain(encoding, &plain));
+            plain.clear();
+            push_escape(&mut out, ch);
+            continue;
         }
         if !ch.is_ascii() {
             let (_, _, unencodable) = encoding.encode(&ch.to_string());

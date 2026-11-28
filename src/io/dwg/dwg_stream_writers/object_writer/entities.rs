@@ -720,7 +720,7 @@ impl<'a> DwgObjectWriter<'a> {
             // Width factor BD 41
             self.writer.write_bit_double(e.width_factor);
             // Text value TV 1
-            self.writer.write_variable_text(&e.value);
+            self.writer.write_variable_text_entity(&e.value);
             // Generation BS 71
             self.writer.write_bit_short(e.generation_flags);
             // Horiz align BS 72
@@ -905,7 +905,7 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_double(extents_width);
 
         // Text TV 1
-        self.writer.write_variable_text(&e.value);
+        self.writer.write_variable_text_entity(&e.value);
 
         // H 7 STYLE (hard pointer). Keep the original reference on a no-op
         // save, including styles whose name cannot be round-tripped through
@@ -4816,7 +4816,7 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_bit_double(rotation);
             self.writer.write_bit_double(height);
             self.writer.write_bit_double(width_factor);
-            self.writer.write_variable_text(text_value);
+            self.writer.write_variable_text_entity(text_value);
             self.writer.write_bit_short(generation);
             self.writer.write_bit_short(horizontal_alignment);
             self.writer.write_bit_short(vertical_alignment);

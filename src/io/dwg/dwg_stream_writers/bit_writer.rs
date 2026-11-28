@@ -580,6 +580,27 @@ impl DwgBitWriter {
     ///
     /// - Pre-R2007: BS length (byte count) + encoded bytes using document encoding
     /// - R2007+ (AC21): BS length (char count) + UTF-16LE bytes
+    /// Entity TEXT/MTEXT/ATTRIB content: keep AutoCAD's `\U+XXXX` escape form
+    /// for characters where WHATWG Big5 differs from classic CP950. Names must
+    /// use `write_variable_text` instead (no escapes in table names).
+    pub fn write_variable_text_entity(&mut self, text: &str) {
+        if text.is_empty() {
+            self.write_bit_short(0);
+            return;
+        }
+        if self.version.uses_unicode_text() {
+            let utf16: Vec<u16> = text.encode_utf16().collect();
+            self.write_bit_short(utf16.len() as i16);
+            for code_unit in &utf16 {
+                self.write_bytes(&code_unit.to_le_bytes());
+            }
+        } else {
+            let encoded = crate::io::dwg::legacy_text::encode_legacy_text_entity(self.encoding, text);
+            self.write_bit_short(encoded.len() as i16);
+            self.write_bytes(&encoded);
+        }
+    }
+
     pub fn write_variable_text(&mut self, text: &str) {
         if text.is_empty() {
             self.write_bit_short(0);
