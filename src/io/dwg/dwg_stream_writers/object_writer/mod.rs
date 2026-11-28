@@ -44,8 +44,12 @@ use crate::types::{BoundingBox3D, DxfVersion, Handle, Vector2};
 /// and anonymous blocks share names like `*U`, `*D`, etc. (no numeric
 /// suffixes).  Our reader adds suffixes (`*Paper_Space0`, `*U1`, …)
 /// for deduplication.  This function strips them back for writing.
+
+/// BLOCK_HEADER entries store the BARE layout name: a real AC1018 file's
+/// block headers are named `*Model_Space`, `*Paper_Space`, `*Paper_Space`
+/// (the layout suffix lives only on the BLOCK/ENDBLK markers, which are
+/// written verbatim). Strip the numeric suffix for the header record only.
 fn dwg_block_name(name: &str) -> &str {
-    // Known multi-word prefixes first
     for prefix in &["*Model_Space", "*Paper_Space"] {
         if name
             .get(..prefix.len())
@@ -57,11 +61,15 @@ fn dwg_block_name(name: &str) -> &str {
             }
         }
     }
-    // Other anonymous blocks (AutoCAD's *D / *U / *H / *T families) carry a
-    // unique numeric suffix that IS the identity of the block. Stripping it
-    // collapsed every anonymous block to the same name, so a drawing with two
-    // copied dimensions lost one of them on read-back (the table de-duplicates
-    // by name). The DWG block name is a string; keep it verbatim.
+    // Other anonymous blocks (*D/*U/*H/*T) keep their identity suffix.
+    name
+}
+
+/// BLOCK/ENDBLK marker names are written verbatim: the layout suffix is part
+/// of the marker identity in a real drawing (`*Paper_Space`, `*Paper_Space0`),
+/// unlike the block-header record which stores the bare name. Keeping this as
+/// its own function makes the distinction explicit and testable.
+fn block_marker_name(name: &str) -> &str {
     name
 }
 
@@ -2228,7 +2236,22 @@ impl<'a> DwgObjectWriter<'a> {
             let entity_handles_for_header = if is_xref && !has_local_geometry {
                 Vec::new()
             } else {
-                let expanded = self.expand_entity_handles(&live_handles);
+                // Phase 18 defect (ACadSharp "Item Vertex2D already has an
+                // owner"): the R2004+ BLOCK_RECORD owned list must contain only
+                // the block's TOP-LEVEL entities. POLYLINE VERTEX/SEQEND and
+                // INSERT ATTRIB handles are owned by their parent entity and
+                // are NOT listed by AutoCAD: a real AC1018 drawing's
+                // *Model_Space owned list holds 11,028 entries (TEXT/INSERT/
+                // POINT/POLYLINE), while this writer listed 44,744 including
+                // 20,672 VERTEX_2D + 6,532 ATTRIB + 3,686 VERTEX_3D + 2,823
+                // SEQEND. A strict reader then assigns those children two
+                // owners and rejects the file. Pre-R2004 keeps the historical
+                // expansion because no evidence for those layouts exists yet.
+                let expanded = if self.version.r2004_plus() {
+                    live_handles.clone()
+                } else {
+                    self.expand_entity_handles(&live_handles)
+                };
                 // Prefer the original DWG-binary order/handles when available,
                 // but only when they describe exactly the same set — otherwise
                 // the file had entities added or removed since it was read and
@@ -2732,13 +2755,15 @@ impl<'a> DwgObjectWriter<'a> {
             &common.face_visual_style_handle, &common.edge_visual_style_handle,
         );
 
-        // Use the original name as-is when we have the Block entity from binary;
-        // only apply dwg_block_name() for programmatically-created blocks.
-        if use_raw_name {
-            self.writer.write_variable_text(name);
-        } else {
-            self.writer.write_variable_text(dwg_block_name(name));
-        }
+        // Phase 18 defect B: write the marker name verbatim. A real AC1018
+        // file's BLOCK markers are named *Model_Space, *Paper_Space,
+        // *Paper_Space0, *U107, *D130 ... i.e. the layout suffix IS part of
+        // the marker identity. dwg_block_name() collapsed "*Paper_Space0" to
+        // "*Paper_Space", so a drawing with more than one layout shipped two
+        // markers with the same name (ACadSharp: "An item with the same key
+        // *Paper_Space has already been added", 47 corpus files).
+        let _ = use_raw_name;
+        self.writer.write_variable_text(block_marker_name(name));
 
         self.register_object(common.handle);
     }
@@ -2939,5 +2964,28 @@ mod p15_font_tests {
             super::validate_font_name("bigfont.shx", enc, super::FontKind::BigFont).unwrap(),
             "bigfont.shx"
         );
+    }
+}
+
+#[cfg(test)]
+mod phase18_name_tests {
+    use super::{block_marker_name, dwg_block_name};
+
+    #[test]
+    fn block_marker_keeps_layout_suffix() {
+        // ACadSharp keys block markers by name: collapsing the suffix produced
+        // two markers called "*Paper_Space" in one file.
+        assert_eq!(block_marker_name("*Paper_Space0"), "*Paper_Space0");
+        assert_eq!(block_marker_name("*Paper_Space12"), "*Paper_Space12");
+        assert_eq!(block_marker_name("*U107"), "*U107");
+    }
+
+    #[test]
+    fn block_header_still_uses_the_bare_layout_name() {
+        // A real drawing's BLOCK_HEADER records are named "*Paper_Space"
+        // (verified with LibreDWG on /sdcard/AIWork/26106 files).
+        assert_eq!(dwg_block_name("*Paper_Space0"), "*Paper_Space");
+        assert_eq!(dwg_block_name("*Model_Space3"), "*Model_Space");
+        assert_eq!(dwg_block_name("*D130"), "*D130");
     }
 }

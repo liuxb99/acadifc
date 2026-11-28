@@ -2137,6 +2137,18 @@ impl CadDocument {
     }
 
     /// Get an entity by handle
+    /// Owned-object handles recorded in a block header of the SOURCE DWG for
+    /// `block_record` (in file order). Empty when the block had no captured
+    /// owned list. Phase 18 uses this to prove the writer no longer lists
+    /// POLYLINE VERTEX / INSERT ATTRIB / SEQEND children (which are owned by
+    /// their parent entity, not by the block record).
+    pub fn block_header_owned_handles(&self, block_record: Handle) -> &[Handle] {
+        self.block_entity_handles
+            .get(&block_record)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
     pub fn get_entity(&self, handle: Handle) -> Option<&EntityType> {
         self.entity_index
             .get(&handle)

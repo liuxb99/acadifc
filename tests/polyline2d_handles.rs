@@ -147,3 +147,43 @@ fn ac1018_copied_polyline_gets_independent_child_handles() {
     assert_eq!(orig.vertices.iter().map(|v| v.location.x).collect::<Vec<_>>(), vec![1.0, 2.0, 3.0]);
     assert_eq!(copy.vertices.iter().map(|v| v.location.x).collect::<Vec<_>>(), vec![1.0, 2.0, 3.0]);
 }
+
+// Phase 18 regression (ACadSharp "Item Vertex2D already has an owner"):
+// the R2004+ BLOCK_RECORD owned list must contain only top-level entities.
+// VERTEX/SEQEND children are owned by their POLYLINE; listing them here gave
+// each child two owners and a strict DWG reader rejected the file.
+#[test]
+fn ac1018_block_header_owned_list_excludes_polyline_children() {
+    let mut document = CadDocument::new();
+    document.version = DxfVersion::AC1018;
+    let mut polyline = Polyline2D::new();
+    polyline.common.handle = Handle::new(0x400);
+    polyline.vertices.push(Vertex2D {
+        handle: Handle::new(0x401),
+        location: acadrust::Vector3::new(1.0, 2.0, 0.0),
+        flags: VertexFlags::new(),
+        start_width: 0.0,
+        end_width: 0.0,
+        bulge: 0.0,
+        curve_tangent: 0.0,
+        id: 0,
+    });
+    polyline.seqend_handle = Some(Handle::new(0x403));
+    document.add_entity(EntityType::Polyline2D(polyline)).unwrap();
+
+    let bytes = DwgWriter::write_to_vec(&document).expect("write DWG");
+    let mut reader = DwgReader::from_stream(Cursor::new(bytes));
+    let reopened = reader.read().expect("reopen DWG");
+    let model = reopened.header.model_space_block_handle;
+    let owned = reopened.block_header_owned_handles(model);
+    assert!(owned.iter().any(|h| h.value() == 0x400),
+            "the polyline itself must stay in the block owned list: {owned:?}");
+    for child in [0x401u64, 0x403] {
+        assert!(!owned.iter().any(|h| h.value() == child),
+                "child handle {child:#X} must not be owned by the block record: {owned:?}");
+    }
+}
+
+// Phase 18 defect B (synthesised BLOCK marker keeps its unique layout name) is
+// covered by the in-module unit tests in object_writer/mod.rs; the writer-level
+// end-to-end gate is the ACadSharp scan (deliverables/phase18/engines/dup-owner).
