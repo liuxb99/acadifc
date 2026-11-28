@@ -1933,6 +1933,53 @@ impl DwgDocumentBuilder {
         }
         let tail_started = web_time::Instant::now();
 
+        // ── Phase 18: drop default-seeded table entries the source never had ──
+        // CadDocument::new() seeds placeholder symbol-table entries for a NEW
+        // drawing ("ACAD"/"AcadAnnotative" APPIDs, "Standard" DIMSTYLE, ...).
+        // While READING an existing file those placeholders are not part of the
+        // document. Keeping an unreplaced one made the writer emit an
+        // unauthorized extra object with a freshly allocated handle:
+        //   * every drawing without annotative scaling: APPID n -> n+1
+        //     (LibreDWG, 25 AC1018 corpus files),
+        //   * every drawing whose only dimstyle is not "Standard": DIMSTYLE
+        //     1 -> 2 (real Civil3D drawings on /sdcard/AIWork).
+        // Only tables with corpus evidence are pruned here; the same rule can
+        // be extended when another placeholder is observed in the matrix.
+        {
+            use std::collections::HashSet;
+            let mut src_app_ids: HashSet<u64> = HashSet::new();
+            let mut src_dim_styles: HashSet<u64> = HashSet::new();
+            for entry in &parsed_entries {
+                match entry {
+                    ParsedEntry::AppId(h, _) => {
+                        src_app_ids.insert(*h);
+                    }
+                    ParsedEntry::DimStyle(h, _) => {
+                        src_dim_styles.insert(*h);
+                    }
+                    _ => {}
+                }
+            }
+            let stale_app_ids: Vec<String> = document
+                .app_ids
+                .iter()
+                .filter(|entry| !src_app_ids.contains(&entry.handle.value()))
+                .map(|entry| entry.name.clone())
+                .collect();
+            for name in stale_app_ids {
+                let _ = document.app_ids.remove(&name);
+            }
+            let stale_dim_styles: Vec<String> = document
+                .dim_styles
+                .iter()
+                .filter(|entry| !src_dim_styles.contains(&entry.handle.value()))
+                .map(|entry| entry.name.clone())
+                .collect();
+            for name in stale_dim_styles {
+                let _ = document.dim_styles.remove(&name);
+            }
+        }
+
         // Ensure allocations made by the repair steps start above every source
         // record, even when the file's HANDSEED was stale.
         let max_from_reader = handles.iter().max().copied().unwrap_or(0);
@@ -1991,6 +2038,39 @@ impl DwgDocumentBuilder {
             occupied.insert(handle);
             handle
         }
+        let trace_probe: std::collections::HashMap<Handle, String> =
+            if std::env::var_os("P18_TRACE_MARKER").is_some() {
+                let mut m = std::collections::HashMap::new();
+                for e in document.entities() {
+                    let name = format!("ENTITY {:?}", e).split('(').next().unwrap_or("?").to_string();
+                    m.entry(e.common().handle).or_insert(name);
+                }
+                for (h, o) in &document.objects {
+                    let name = format!("OBJECT {:?}", std::mem::discriminant(o));
+                    m.entry(*h).or_insert(name);
+                }
+                for t in document.layers.iter() {
+                    m.entry(t.handle).or_insert_with(|| format!("LAYER {:?}", t.name));
+                }
+                for t in document.text_styles.iter() {
+                    m.entry(t.handle).or_insert_with(|| format!("STYLE {:?}", t.name));
+                }
+                for t in document.line_types.iter() {
+                    m.entry(t.handle).or_insert_with(|| format!("LTYPE {:?}", t.name));
+                }
+                for t in document.dim_styles.iter() {
+                    m.entry(t.handle).or_insert_with(|| format!("DIMSTYLE {:?}", t.name));
+                }
+                for t in document.app_ids.iter() {
+                    m.entry(t.handle).or_insert_with(|| format!("APPID {:?}", t.name));
+                }
+                for br in document.block_records.iter() {
+                    m.entry(br.handle).or_insert_with(|| format!("BLOCKRECORD {:?}", br.name));
+                }
+                m
+            } else {
+                std::collections::HashMap::new()
+            };
         let mut next_handle = document.header.handle_seed.max(1);
         for record in document.block_records.iter_mut() {
             if record.block_entity_handle.is_null()
@@ -2004,8 +2084,18 @@ impl DwgDocumentBuilder {
             if record.block_end_handle.is_null()
                 || occupied.contains(&record.block_end_handle)
             {
+                let stale = record.block_end_handle;
                 record.block_end_handle =
                     allocate_marker(&mut occupied, &mut next_handle);
+                if std::env::var_os("P18_TRACE_MARKER").is_some() {
+                    let probe = trace_probe
+                        .get(&stale)
+                        .map(|v| v.as_str())
+                        .unwrap_or("not-in-document");
+                    eprintln!(
+                        "[p18] rehomed ENDBLK marker of '{}' {:X} -> {:X}: conflicting object is {}",
+                        record.name, stale.value(), record.block_end_handle.value(), probe);
+                }
             } else {
                 occupied.insert(record.block_end_handle);
             }

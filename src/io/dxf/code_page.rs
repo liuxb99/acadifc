@@ -319,7 +319,18 @@ impl EncodingContext {
         };
         let target_encoding = encoding_from_code_page(&name)
             .unwrap_or(encoding_rs::WINDOWS_1252);
-        let transcoding = source_id != 0 && source_id != id;
+        // Phase 18: `transcoding` must mean "the byte representation changes",
+        // not "the numeric id changes".  DOS-era ids and their ANSI successors
+        // decode to the SAME encoding (24/41 -> BIG5, 22/38 -> ANSI_932,
+        // 25/40 -> KOREAN, 26/42 -> JOHAB, 31/39 -> GB2312), so replaying raw
+        // source bytes is byte-identical and safe.  Comparing ids alone made a
+        // no-op save of a cp24 drawing fail closed ("raw-only object cannot be
+        // transcoded 24 -> 41") even though nothing needed re-encoding.
+        let source_matches_target = match source_encoding {
+            Some(src) => src.name() == target_encoding.name(),
+            None => false,
+        };
+        let transcoding = source_id != 0 && source_id != id && !source_matches_target;
         Self {
             version: document.version,
             codepage_id: id,

@@ -67,3 +67,37 @@ fn ac1018_text_update_preserves_untouched_raw_records() {
     assert!(compared > 0, "no untouched records were compared");
     assert!(after.raw_object_records.contains_key(&Handle::from(target.value())));
 }
+
+// Phase 18 regression: a DOS-era code page id (24 = BIG5) normalises to the
+// ANSI id 41, but both decode to the SAME legacy encoding, so a no-op save must
+// NOT be treated as a cross-code-page transcode.  Before this fix, every
+// AC1018 drawing whose header stored 24 failed with
+// "raw-only object ... cannot be transcoded (source codepage 24 -> target codepage 41)".
+#[test]
+fn dos_big5_codepage_id_24_is_not_a_transcode() {
+    use acadrust::io::dxf::code_page::EncodingContext;
+    let mut doc = acadrust::CadDocument::default();
+    doc.version = acadrust::types::DxfVersion::AC1018;
+    doc.dwg_code_page_index = Some(24);
+    doc.header.code_page = "BIG5".to_string();
+    let ctx = EncodingContext::new(&doc);
+    assert_eq!(ctx.codepage_id, 41, "cp24 must normalise to ANSI_950 (41)");
+    assert_eq!(ctx.source_codepage_id, 24);
+    assert!(!ctx.transcoding,
+            "cp24 and cp41 are both BIG5: raw replay is byte-identical");
+    assert_eq!(ctx.source_encoding.map(|e| e.name()),
+               Some(ctx.target_encoding.name()));
+
+    // A genuine change of encoding must still be flagged: an ANSI_1252 file
+    // that actually contains Chinese must be promoted to ANSI_950 and its
+    // raw records may not be copied verbatim.
+    let mut doc2 = acadrust::CadDocument::default();
+    doc2.version = acadrust::types::DxfVersion::AC1018;
+    doc2.dwg_code_page_index = Some(30); // ANSI_1252
+    doc2.header.code_page = "ANSI_1252".to_string();
+    doc2.layers.add(acadrust::tables::Layer::new("縱斷面")).unwrap();
+    let ctx2 = EncodingContext::new(&doc2);
+    assert_eq!(ctx2.codepage_id, 41, "1252 + CJK content is promoted to BIG5");
+    assert_eq!(ctx2.source_codepage_id, 30);
+    assert!(ctx2.transcoding, "1252 -> 950 changes bytes and must transcode");
+}
