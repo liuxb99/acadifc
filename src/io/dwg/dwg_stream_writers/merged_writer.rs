@@ -239,7 +239,14 @@ impl DwgMergedWriter {
     }
 
     pub fn write_variable_text_entity(&mut self, text: &str) {
-        self.main.write_variable_text_entity(text);
+        // Must dispatch exactly like write_variable_text(): R2004+ uses the
+        // separate text stream, and writing entity TEXT to the main stream
+        // made the value disappear on reopen (generated drawings lost ALL
+        // TEXT values - the 1.0.9 regression).
+        match self.mode {
+            MergeMode::ThreeStream => self.text.write_variable_text_entity(text),
+            MergeMode::TwoStream => self.main.write_variable_text_entity(text),
+        }
     }
 
     pub fn write_bit_double_with_default(&mut self, def: f64, value: f64) {
